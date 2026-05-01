@@ -392,11 +392,48 @@
       tags: [k8s_storage]
 
     # ── Stage 3: initialize cluster (control plane) ───────────────────────────
-    - name: Check if Kubernetes cluster is already initialized
+    - name: Check if this node has already joined a cluster
+      stat:
+        path: /etc/kubernetes/kubelet.conf
+      register: kubelet_conf
+      tags: [k8s_cluster_init]
+
+    - name: Check if Kubernetes cluster is already initialized (control plane)
       stat:
         path: /etc/kubernetes/admin.conf
       register: kubeadm_conf
       when: "'control_plane' in group_names"
+      tags: [k8s_cluster_init]
+
+    # Checks all applicable K8s dirs for leftover content from a previous attempt.
+    # control_plane_only dirs (etcd) are skipped on workers.
+    # Uses shell find because Ansible's find module lacks min_depth support here.
+    - name: Check for leftover data in K8s directories
+      shell: "find {{ item.local_path }} -mindepth 1 -maxdepth 1 | head -1"
+      register: k8s_dir_contents
+      loop: "{{ k8s_dirs | rejectattr('control_plane_only') | list
+               + (k8s_dirs | selectattr('control_plane_only') | list
+                  if 'control_plane' in group_names else []) }}"
+      when: not kubelet_conf.stat.exists
+      changed_when: false
+      failed_when: false
+      tags: [k8s_cluster_init]
+
+    - name: Reset previous cluster state on all nodes (leftover K8s data detected)
+      command: kubeadm reset -f
+      when: >-
+        not kubelet_conf.stat.exists and
+        (k8s_dir_contents.results | default([]) | selectattr('stdout', 'defined') | selectattr('stdout') | list | length > 0)
+      tags: [k8s_cluster_init]
+
+    - name: Wipe leftover K8s directory contents after reset
+      shell: "rm -rf {{ item.local_path }}/*"
+      loop: "{{ k8s_dirs | rejectattr('control_plane_only') | list
+               + (k8s_dirs | selectattr('control_plane_only') | list
+                  if 'control_plane' in group_names else []) }}"
+      when: >-
+        not kubelet_conf.stat.exists and
+        (k8s_dir_contents.results | default([]) | selectattr('stdout', 'defined') | selectattr('stdout') | list | length > 0)
       tags: [k8s_cluster_init]
 
     - name: Initialize Kubernetes cluster

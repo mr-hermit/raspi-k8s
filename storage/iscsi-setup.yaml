@@ -90,11 +90,14 @@
         line: "InitiatorName={{ iscsi_initiator_iqn }}"
       tags: [iscsi_client]
 
-    - name: Configure iSCSI daemon for automatic node startup
+    # Manual is the safe default — only this node's own target is set to automatic
+    # (done in iscsi_connect stage after discovery). If left as automatic here,
+    # open-iscsi loginall would connect to every discovered target on every node.
+    - name: Configure iSCSI daemon — manual startup by default
       lineinfile:
         path: /etc/iscsi/iscsid.conf
         regexp: '^node\.startup'
-        line: 'node.startup = automatic'
+        line: 'node.startup = manual'
       tags: [iscsi_client]
 
     # Increase login timeout so disk-hibernating NAS has time to spin up (default 15s
@@ -209,6 +212,27 @@
       when: iscsi_target_iqn not in iscsi_sessions.stdout
       tags: [iscsi_connect]
 
+    # Force every discovered target to manual, then flip only ours to automatic.
+    # This is idempotent and also corrects nodes that were previously misconfigured
+    # with global automatic startup (which caused all nodes to connect all LUNs).
+    - name: Set all discovered targets to manual startup
+      shell: |
+        iscsiadm -m node 2>/dev/null | awk '{print $1, $2}' | \
+        while read portal target; do
+          iscsiadm -m node -T "$target" -p "$portal" \
+            -o update -n node.startup -v manual 2>/dev/null || true
+        done
+      changed_when: false
+      tags: [iscsi_connect]
+
+    - name: Set this node's target to automatic startup
+      command: >
+        iscsiadm -m node
+          -T {{ iscsi_target_iqn }}
+          -p {{ nas_host }}:{{ nas_iscsi_port }}
+          -o update -n node.startup -v automatic
+      tags: [iscsi_connect]
+
     # /dev/disk/by-path/ contains stable IQN-named symlinks as soon as the session
     # is up — more reliable than parsing iscsiadm text output (format varies by version).
     # Filter out -partN entries so we get the whole-disk device only.
@@ -272,10 +296,11 @@
         fstype: ext4
         # _netdev                     — mount after network is up
         # x-systemd.requires          — wait for open-iscsi login before mounting
-        # x-systemd.mount-timeout-sec — 0 = wait indefinitely (NAS may be waking up)
-        # No nofail: kubelet/CRI-O must not start until this mount succeeds.
-        #            nas-wait.service ensures boot still completes for SSH etc.
-        opts: "defaults,_netdev,x-systemd.requires=open-iscsi.service,x-systemd.mount-timeout-sec=0"
+        # x-systemd.mount-timeout-sec — give NAS time to wake up, but don't block forever
+        # nofail                      — if mount times out, boot continues and SSH stays
+        #                               accessible; kubelet/CRI-O won't start without the
+        #                               mount anyway (Requires= in their drop-in overrides)
+        opts: "defaults,_netdev,nofail,x-systemd.requires=open-iscsi.service,x-systemd.mount-timeout-sec=180"
         state: mounted
       tags: [iscsi_mount]
 

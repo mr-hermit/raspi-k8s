@@ -41,7 +41,7 @@ registry_storage_size=50Gi
 # ansible_host is a name, or match the Pi's OS hostname if ansible_host is an IP.
 
 [control_plane]
-control-plane-node ansible_host=192.168.1.101
+control_plane_node ansible_host=192.168.1.101
 
 [worker_node]
 worker_node_1 ansible_host=192.168.1.102

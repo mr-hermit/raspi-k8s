@@ -90,7 +90,7 @@ via Raspberry Pi Imager's advanced settings when flashing the SD card:
    reservation or directly in Ubuntu's netplan). Then update `inventory.ini` to
    use IPs instead of hostnames for `ansible_host`:
    ```ini
-   control-plane-node ansible_host=192.168.1.101
+   control_plane_node ansible_host=192.168.1.101
    worker_node_1      ansible_host=192.168.1.102
    worker_node_2      ansible_host=192.168.1.103
    ```

@@ -51,6 +51,7 @@ section() {
 
 ANSIBLE_USER="ubuntu"
 declare -A HOST_ADDR   # inventory_name → ansible_host value
+declare -A REACHABLE   # inventory_name → 1 if port 22 is open
 CONTROL_NODES=()
 WORKER_NODES=()
 
@@ -96,9 +97,10 @@ check_connectivity() {
   for name in "${CONTROL_NODES[@]}" "${WORKER_NODES[@]}"; do
     addr="${HOST_ADDR[$name]}"
     if timeout 4 bash -c "echo > /dev/tcp/${addr}/22" 2>/dev/null; then
+      REACHABLE["$name"]=1
       check "$name  ($addr)" "OK" "SSH port reachable"
     else
-      check "$name  ($addr)" "CRITICAL" "port 22 unreachable"
+      check "$name  ($addr)" "CRITICAL" "port 22 unreachable — skipping further checks for this node"
     fi
   done
 }
@@ -107,6 +109,7 @@ check_ssh_auth() {
   section "SSH Key Authentication"
   local name addr
   for name in "${CONTROL_NODES[@]}" "${WORKER_NODES[@]}"; do
+    [[ -n "${REACHABLE[$name]+x}" ]] || continue
     addr="${HOST_ADDR[$name]}"
     if ssh_run "$addr" true; then
       check "$name  key auth" "OK"
@@ -120,6 +123,7 @@ check_iscsi() {
   section "iSCSI Storage"
   local name addr
   for name in "${CONTROL_NODES[@]}" "${WORKER_NODES[@]}"; do
+    [[ -n "${REACHABLE[$name]+x}" ]] || continue
     addr="${HOST_ADDR[$name]}"
 
     if ! ssh_run "$addr" "command -v iscsiadm" &>/dev/null; then
@@ -146,10 +150,12 @@ check_iscsi() {
     local expected=4
     [[ "${CONTROL_NODES[0]:-}" == "$name" ]] && expected=5  # +etcd on control plane
     local actual
-    actual=$(ssh_run "$addr" "mount | grep -c '/mnt/storage/' 2>/dev/null" || echo 0)
-    [[ "$actual" -ge "$expected" ]] \
-      && check "$name  bind mounts" "OK"      "${actual}/${expected}" \
-      || check "$name  bind mounts" "WARNING" "${actual}/${expected} — some K8s dirs may be on SD card"
+    actual=$(ssh_run "$addr" "mount | grep '/mnt/storage/' | wc -l" || echo 0)
+    actual=$(echo "$actual" | tr -d '[:space:]')
+    if   [[ "$actual" -eq 0 ]];              then check "$name  bind mounts" "NOT_CONFIGURED" "K8s not set up yet"
+    elif [[ "$actual" -ge "$expected" ]];    then check "$name  bind mounts" "OK"             "${actual}/${expected}"
+    else                                          check "$name  bind mounts" "WARNING"         "${actual}/${expected} — some K8s dirs may be on SD card"
+    fi
   done
 }
 
@@ -157,6 +163,7 @@ check_k8s_services() {
   section "Kubernetes Services"
   local name addr
   for name in "${CONTROL_NODES[@]}" "${WORKER_NODES[@]}"; do
+    [[ -n "${REACHABLE[$name]+x}" ]] || continue
     addr="${HOST_ADDR[$name]}"
     for svc in crio kubelet; do
       local info load active
@@ -176,6 +183,12 @@ check_k8s_services() {
 
 check_k8s_cluster() {
   section "Kubernetes Cluster"
+
+  local cp="${CONTROL_NODES[0]:-}"
+  if [[ -n "$cp" && -z "${REACHABLE[$cp]+x}" ]]; then
+    check "control plane" "CRITICAL" "unreachable — skipping all cluster checks"
+    return
+  fi
 
   if [[ ! -f "$KUBECONFIG_RASPI" ]]; then
     check "kubeconfig" "NOT_CONFIGURED" \
@@ -244,6 +257,12 @@ check_k8s_cluster() {
 
 check_registry() {
   section "Container Registry"
+
+  local cp="${CONTROL_NODES[0]:-}"
+  if [[ -n "$cp" && -z "${REACHABLE[$cp]+x}" ]]; then
+    check "registry" "CRITICAL" "control plane unreachable — skipping"
+    return
+  fi
 
   if [[ ! -f "$KUBECONFIG_RASPI" ]]; then
     check "registry" "NOT_CONFIGURED" "no kubeconfig — skipping"
