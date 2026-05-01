@@ -31,16 +31,16 @@ HTTP (no TLS), which is appropriate for an isolated lab network.
 
 ```bash
 # Configure all nodes + deploy registry in one go
-ansible-playbook -i inventory.ini registry/registry-setup.yaml
+ansible-playbook -i inventory.ini addons/registry/registry-setup.yaml
 ```
 
 Stage by stage:
 ```bash
 # 1. Configure CRI-O on all nodes to trust the insecure registry
-ansible-playbook -i inventory.ini registry/registry-setup.yaml --tags registry_config
+ansible-playbook -i inventory.ini addons/registry/registry-setup.yaml --tags registry_config
 
 # 2. Deploy registry Deployment + Service to K8s
-ansible-playbook -i inventory.ini registry/registry-setup.yaml --tags registry_deploy
+ansible-playbook -i inventory.ini addons/registry/registry-setup.yaml --tags registry_deploy
 ```
 
 ---
@@ -73,11 +73,18 @@ docker push rasserv01:30500/myimage:latest
 
 ### Pull in K8s manifests
 
+Use either the full address or the `raspi/` short-name prefix:
+
 ```yaml
+# Full address
 image: rasserv01:30500/myimage:latest
+
+# Short name (CRI-O resolves raspi/* → rasserv01:30500/*)
+image: raspi/myimage:latest
 ```
 
-No `imagePullSecrets` needed — CRI-O is already configured to trust the registry.
+No `imagePullSecrets` needed — CRI-O is already configured to trust the registry
+and knows the `raspi/` prefix maps to it.
 
 ### Verify the registry is working
 
@@ -102,7 +109,7 @@ curl http://rasserv01:30500/v2/myimage/tags/list
 
 Override on the command line:
 ```bash
-ansible-playbook -i inventory.ini registry/registry-setup.yaml \
+ansible-playbook -i inventory.ini addons/registry/registry-setup.yaml \
   -e "registry_nodeport=30501 registry_storage_size=100Gi"
 ```
 
@@ -112,7 +119,7 @@ ansible-playbook -i inventory.ini registry/registry-setup.yaml \
 
 | Tag | What it does |
 |-----|-------------|
-| `registry_config` | Add insecure-registry entry to CRI-O on all nodes, restart CRI-O |
+| `registry_config` | Add insecure-registry + `raspi/` prefix alias to CRI-O on all nodes, restart CRI-O |
 | `registry_deploy` | Create PV/PVC, deploy registry Deployment + NodePort Service |
 
 ---

@@ -1,19 +1,19 @@
 ---
-# dashboard/dashboard-setup.yaml
+# addons/dashboard/dashboard-setup.yaml
 #
 # PURPOSE: Deploy Headlamp — a lightweight Kubernetes web UI (~60MB RAM).
 #          Chosen over the official K8s Dashboard (~200MB) to leave more
 #          resources available for actual workloads on Pi hardware.
 #
 # RUN AFTER k8s/k8s-setup.yaml
-# OPTIONAL: run ingress/ingress-setup.yaml first for hostname-based access.
+# OPTIONAL: run addons/ingress/ingress-setup.yaml first for hostname-based access.
 #
 # USAGE:
-#   ansible-playbook -i inventory.ini dashboard/dashboard-setup.yaml
+#   ansible-playbook -i inventory.ini addons/dashboard/dashboard-setup.yaml
 #
 # ACCESS:
 #   NodePort: http://<any-node-ip>:30100
-#   Ingress (if installed): http://headlamp.local:30080
+#   Ingress (if installed): https://headlamp.local:30443
 #
 # TAGS (selective execution):
 #   headlamp         — install Headlamp

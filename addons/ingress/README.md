@@ -11,7 +11,7 @@ Deploys:
 ## Usage
 
 ```bash
-ansible-playbook -i inventory.ini ingress/ingress-setup.yaml
+ansible-playbook -i inventory.ini addons/ingress/ingress-setup.yaml
 ```
 
 ## Access

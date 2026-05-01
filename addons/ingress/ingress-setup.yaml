@@ -1,5 +1,5 @@
 ---
-# ingress/ingress-setup.yaml
+# addons/ingress/ingress-setup.yaml
 #
 # PURPOSE: Deploy Nginx Ingress Controller + cert-manager on the K8s cluster.
 #          Ingress gives hostname-based routing to services without managing
@@ -11,7 +11,7 @@
 # RUN AFTER k8s/k8s-setup.yaml
 #
 # USAGE:
-#   ansible-playbook -i inventory.ini ingress/ingress-setup.yaml
+#   ansible-playbook -i inventory.ini addons/ingress/ingress-setup.yaml
 #
 # TAGS (selective execution):
 #   ingress      — install Nginx Ingress Controller

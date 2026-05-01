@@ -1,5 +1,5 @@
 ---
-# monitoring/monitoring-setup.yaml
+# addons/monitoring/monitoring-setup.yaml
 #
 # PURPOSE: Deploy Prometheus + Grafana on the K8s cluster using Helm.
 #          Grafana is exposed as a NodePort (32000) on every cluster node.
@@ -7,7 +7,7 @@
 # RUN AFTER k8s/k8s-setup.yaml
 #
 # USAGE:
-#   ansible-playbook -i inventory.ini monitoring/monitoring-setup.yaml
+#   ansible-playbook -i inventory.ini addons/monitoring/monitoring-setup.yaml
 #
 # TAGS (selective execution):
 #   metrics_server — install Metrics Server (kubectl top, HPA)

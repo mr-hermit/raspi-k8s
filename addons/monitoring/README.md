@@ -15,7 +15,7 @@ This is optional. Skip it if you don't need cluster metrics or dashboards.
 ## Usage
 
 ```bash
-ansible-playbook -i inventory.ini monitoring/monitoring-setup.yaml
+ansible-playbook -i inventory.ini addons/monitoring/monitoring-setup.yaml
 ```
 
 ## Accessing Grafana

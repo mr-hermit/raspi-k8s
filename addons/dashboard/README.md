@@ -12,10 +12,10 @@ more headroom for actual workloads on Pi hardware.
 
 ```bash
 # Install Headlamp (NodePort access)
-ansible-playbook -i inventory.ini dashboard/dashboard-setup.yaml
+ansible-playbook -i inventory.ini addons/dashboard/dashboard-setup.yaml
 
-# Also expose via Ingress (run ingress/ingress-setup.yaml first)
-ansible-playbook -i inventory.ini dashboard/dashboard-setup.yaml --tags headlamp_ingress
+# Also expose via Ingress (run addons/ingress/ingress-setup.yaml first)
+ansible-playbook -i inventory.ini addons/dashboard/dashboard-setup.yaml --tags headlamp_ingress
 ```
 
 ## Access

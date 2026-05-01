@@ -1,16 +1,19 @@
 ---
-# registry/registry-setup.yaml
+# addons/registry/registry-setup.yaml
 #
 # PURPOSE: Deploy a private Docker-compatible registry on the K8s cluster and
 #          configure all nodes to pull from it without TLS.
 #
+#          A short-name prefix "raspi" is registered so pods can reference
+#          images as raspi/myimage:tag instead of <ip>:<port>/myimage:tag.
+#
 # RUN AFTER k8s/k8s-setup.yaml
 #
 # USAGE:
-#   ansible-playbook -i inventory.ini registry/registry-setup.yaml
+#   ansible-playbook -i inventory.ini addons/registry/registry-setup.yaml
 #
 # TAGS:
-#   registry_config  — add insecure-registry entry to CRI-O on every node
+#   registry_config  — add insecure-registry + prefix alias to CRI-O on every node
 #   registry_deploy  — deploy registry Deployment + Service to K8s
 
 # ── Play 1: trust the registry on every node ─────────────────────────────────
@@ -30,11 +33,18 @@
         mode: "0755"
       tags: [registry_config]
 
-    - name: Add private registry as insecure source
+    - name: Configure private registry — insecure trust and short-name prefix
       copy:
         dest: /etc/containers/registries.conf.d/local-registry.conf
         content: |
+          # Trust the registry over plain HTTP
           [[registry]]
+          location = "{{ registry_host }}:{{ registry_nodeport }}"
+          insecure = true
+
+          # Short-name alias: raspi/image → {{ registry_host }}:{{ registry_nodeport }}/image
+          [[registry]]
+          prefix = "raspi"
           location = "{{ registry_host }}:{{ registry_nodeport }}"
           insecure = true
         mode: "0644"
@@ -86,5 +96,7 @@
 
     - name: Show registry address
       debug:
-        msg: "Registry available at {{ ansible_host }}:{{ registry_nodeport }}"
+        msg: >-
+          Registry available at {{ ansible_host }}:{{ registry_nodeport }}
+          — use image: raspi/myimage:tag in pod specs
       tags: [registry_deploy]

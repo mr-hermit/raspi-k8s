@@ -45,34 +45,35 @@ raspi/
 │       ├── cni/
 │       └── services/
 │
-├── monitoring/          Phase 3 — Metrics, logs, dashboards (optional, pick what you need)
-│   ├── README.md
-│   ├── monitoring-setup.yaml → Metrics Server, Prometheus, Grafana, Loki+Promtail
-│   └── files/
-│       └── grafana-service.yaml
-│
-├── ingress/             Phase 4 — Nginx Ingress Controller + cert-manager (optional)
-│   ├── README.md
-│   ├── ingress-setup.yaml → Ingress Controller (NodePort 30080/30443) + self-signed TLS
-│   └── files/
-│       └── cluster-issuer.yaml
-│
-├── dashboard/           Phase 5 — Headlamp K8s web UI (optional)
-│   ├── README.md
-│   └── dashboard-setup.yaml → Headlamp (NodePort 30100) + optional Ingress
-│
-├── registry/            Phase 6 — Private container registry on K8s (optional)
-│   ├── README.md
-│   ├── registry-setup.yaml → Deploy registry + configure CRI-O on nodes
-│   └── files/
-│       └── registry.yaml.j2
-│
-└── terraform/           Phase 7 — Deploy workloads to K8s with Terraform
-    ├── README.md        → Module reference + workflow guide
-    ├── modules/
-    │   └── raspi-k8s/   → Reusable module: Deployment + Service (+ optional PV/PVC)
-    └── environments/
-        └── raspi/       → Live environment — add one module block per service
+└── addons/              Phases 3-6 — Optional K8s components (install per component)
+    ├── monitoring/      Phase 3 — Metrics Server + Prometheus + Grafana + Loki
+    │   ├── README.md
+    │   ├── monitoring-setup.yaml
+    │   └── files/
+    │       └── grafana-service.yaml
+    │
+    ├── ingress/         Phase 4 — Nginx Ingress Controller + cert-manager
+    │   ├── README.md
+    │   ├── ingress-setup.yaml
+    │   └── files/
+    │       └── cluster-issuer.yaml
+    │
+    ├── dashboard/       Phase 5 — Headlamp K8s web UI
+    │   ├── README.md
+    │   └── dashboard-setup.yaml
+    │
+    └── registry/        Phase 6 — Private container registry on K8s
+        ├── README.md
+        ├── registry-setup.yaml
+        └── files/
+            └── registry.yaml.j2
+
+terraform/               Phase 7 — Deploy workloads to K8s with Terraform
+├── README.md            → Module reference + workflow guide
+├── modules/
+│   └── raspi-k8s/       → Reusable module: Deployment + Service (+ optional PV/PVC)
+└── environments/
+    └── raspi/           → Live environment — add one module block per service
 ```
 
 ## Before you start
@@ -110,34 +111,25 @@ vim inventory.ini    # set ansible_host IPs, nas_host, ansible_user, passwords
 ansible-playbook -i inventory.ini server/server-setup.yaml
 
 # 2. (Optional) Attach iSCSI storage from Synology NAS
-#    Manual NAS prep first — see storage/README.md → Part 1
+#    Manual NAS prep first — see storage/README.md
 ansible-playbook -i inventory.ini storage/iscsi-setup.yaml
 
-# 3. Set up Kubernetes cluster (packages → K8s dirs → cluster init → workers → metrics)
+# 3. Kubernetes cluster
 ansible-playbook -i inventory.ini k8s/k8s-setup.yaml
 
-# 4. (Optional) Monitoring — pick the tags you need
-ansible-playbook -i inventory.ini monitoring/monitoring-setup.yaml --tags metrics_server
-ansible-playbook -i inventory.ini monitoring/monitoring-setup.yaml --tags prometheus
-ansible-playbook -i inventory.ini monitoring/monitoring-setup.yaml --tags grafana
-ansible-playbook -i inventory.ini monitoring/monitoring-setup.yaml --tags loki
+# Addons — each is independent, run after k8s-setup.yaml
+ansible-playbook -i inventory.ini addons/monitoring/monitoring-setup.yaml
+ansible-playbook -i inventory.ini addons/ingress/ingress-setup.yaml
+ansible-playbook -i inventory.ini addons/dashboard/dashboard-setup.yaml
+ansible-playbook -i inventory.ini addons/registry/registry-setup.yaml
 
-# 5. (Optional) Ingress Controller + cert-manager
-ansible-playbook -i inventory.ini ingress/ingress-setup.yaml
-
-# 6. (Optional) Headlamp web UI
-ansible-playbook -i inventory.ini dashboard/dashboard-setup.yaml
-
-# 7. (Optional) Private container registry
-ansible-playbook -i inventory.ini registry/registry-setup.yaml
-
-# 6. Copy kubeconfig to your control machine
+# Copy kubeconfig to your control machine
 scp hermit@rasserv01:~/.kube/config ~/.kube/config-raspi
 
-# 7. Validate the cluster
+# Validate the cluster
 ./healthcheck.sh
 
-# 8. Deploy your workloads with Terraform
+# Deploy your workloads with Terraform
 cd terraform/environments/raspi
 terraform init && terraform apply
 ```
@@ -167,10 +159,8 @@ ansible-vault encrypt inventory.ini
 - [server/README.md](server/README.md) — OS baseline setup
 - [storage/README.md](storage/README.md) — Synology iSCSI setup (manual steps + playbook)
 - [k8s/README.md](k8s/README.md) — Kubernetes cluster setup
-- [monitoring/README.md](monitoring/README.md) — Metrics Server, Prometheus, Grafana, Loki
-- [ingress/README.md](ingress/README.md) — Nginx Ingress Controller + cert-manager
-- [dashboard/README.md](dashboard/README.md) — Headlamp K8s web UI
-- [registry/README.md](registry/README.md) — Private container registry
-- [terraform/README.md](terraform/README.md) — Terraform module reference and workflow
-- [registry/README.md](registry/README.md) — Private container registry
+- [addons/monitoring/README.md](addons/monitoring/README.md) — Metrics Server, Prometheus, Grafana, Loki
+- [addons/ingress/README.md](addons/ingress/README.md) — Nginx Ingress Controller + cert-manager
+- [addons/dashboard/README.md](addons/dashboard/README.md) — Headlamp K8s web UI
+- [addons/registry/README.md](addons/registry/README.md) — Private container registry
 - [terraform/README.md](terraform/README.md) — Terraform module reference and workflow
