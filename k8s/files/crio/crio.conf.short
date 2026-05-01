@@ -1,0 +1,6 @@
+[crio.runtime]
+cgroup_manager="systemd"
+
+[crio.image]
+pause_image="registry.k8s.io/pause:3.10"
+

@@ -1,0 +1,102 @@
+---
+# server/server-setup.yaml
+#
+# PURPOSE: Generic OS baseline for every node in the lab.
+#          Installs updates, hardens SSH, configures sudo, populates /etc/hosts,
+#          and reboots if the kernel changed.
+#
+#          Run this FIRST — before any component-specific playbook.
+#          It is intentionally independent of Kubernetes and storage so it can
+#          be reused for any Ubuntu Server node added to the lab.
+#
+# USAGE:
+#   ansible-playbook -i inventory.ini server/server-setup.yaml
+
+- name: Server baseline configuration
+  hosts: raspservers
+  become: yes
+  # ssh_public_key_path is set in inventory.ini (or override with -e)
+
+  tasks:
+    - name: Upgrade all packages to latest versions
+      apt:
+        upgrade: yes
+        update_cache: yes
+      register: pkg_upgrade
+      tags: [server_setup]
+
+    - name: Allow ansible_user to run sudo without a password
+      lineinfile:
+        path: /etc/sudoers
+        state: present
+        line: "{{ ansible_user }} ALL=(ALL) NOPASSWD:ALL"
+        validate: 'visudo -cf %s'
+      tags: [server_setup]
+
+    - name: Install SSH public key in authorized_keys
+      authorized_key:
+        user: "{{ ansible_user }}"
+        state: present
+        key: "{{ lookup('file', ssh_public_key_path) }}"
+      tags: [server_setup]
+
+    # Ubuntu Server ships /etc/ssh/sshd_config.d/50-cloud-init.conf which sets
+    # PasswordAuthentication yes and is included before the main sshd_config.
+    # A drop-in numbered lower (00-) wins because OpenSSH takes the first
+    # occurrence of each directive.
+    - name: Harden SSH — disable password authentication
+      copy:
+        dest: /etc/ssh/sshd_config.d/00-lab-hardening.conf
+        content: |
+          PasswordAuthentication no
+          AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2
+        mode: "0644"
+      notify: Restart SSH
+      tags: [server_setup]
+
+    # Ubuntu cloud-init rewrites /etc/hosts on every boot when manage_etc_hosts
+    # is true (the default). Disable it first so our entries survive reboots.
+    - name: Stop cloud-init from managing /etc/hosts
+      lineinfile:
+        path: /etc/cloud/cloud.cfg
+        regexp: '^manage_etc_hosts'
+        line: 'manage_etc_hosts: false'
+      tags: [server_setup]
+
+    # /etc/hosts uses ansible_hostname (the actual OS hostname fact) so that
+    # inter-node name resolution works correctly. Kubernetes registers nodes
+    # by their OS hostname, so the names here must match.
+    # Note: set ansible_host to IP addresses in inventory.ini to avoid DNS
+    # dependency — see the "Before you start" section in the root README.
+    - name: Populate /etc/hosts with cluster peers
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ hostvars[item].ansible_host }} {{ hostvars[item].ansible_hostname }}"
+      loop: "{{ groups['raspservers'] }}"
+      when: item != inventory_hostname
+      tags: [server_setup]
+
+    - name: Reboot to apply kernel updates
+      reboot:
+        reboot_timeout: 300
+        connect_timeout: 300
+        msg: "Reboot initiated by Ansible for kernel update"
+        pre_reboot_delay: 30
+        post_reboot_delay: 60
+        test_command: uptime
+      when: pkg_upgrade.changed
+      tags: [server_setup]
+
+    - name: Wait for nodes to come back online
+      wait_for_connection:
+        delay: 10
+        sleep: 5
+        timeout: 300
+      when: pkg_upgrade.changed
+      tags: [server_setup]
+
+  handlers:
+    - name: Restart SSH
+      service:
+        name: ssh
+        state: restarted

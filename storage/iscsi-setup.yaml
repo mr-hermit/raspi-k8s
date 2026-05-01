@@ -1,0 +1,329 @@
+---
+# storage/iscsi-setup.yaml
+#
+# PURPOSE: Attach a dedicated iSCSI block device (from Synology NAS) to every
+#          Pi node, format it, and mount it at iscsi_mount_point (/mnt/storage).
+#
+#          This playbook is storage-only: it does not know about Kubernetes.
+#          K8s directory layout and bind mounts are set up by k8s/k8s-setup.yaml.
+#
+# RUN THIS BEFORE the k8s playbook.
+#
+# USAGE:
+#   ansible-playbook -i inventory.ini storage/iscsi-setup.yaml
+#
+# TAGS (run individual stages):
+#   iscsi_client     — install open-iscsi, set initiator IQN, nas-wait service
+#   iscsi_connect    — discover target, login, format device (first run only)
+#   iscsi_mount      — fstab entry + mount iSCSI volume
+#   iscsi_keepalive  — install keepalive timer to prevent NAS hibernation
+
+# ── Pre-flight: install open-iscsi and verify NAS targets are discoverable ───
+# Runs before every stage (tags: always). Use --tags preflight to run only this.
+- name: "Pre-flight: verify iSCSI targets are reachable"
+  hosts: raspservers
+  become: yes
+  gather_facts: yes
+  tasks:
+    - name: Install open-iscsi
+      apt:
+        name: open-iscsi
+        state: present
+        update_cache: yes
+      tags: [always, preflight]
+
+    - name: Discover iSCSI targets on NAS
+      command: iscsiadm -m discovery -t sendtargets -p {{ nas_host }}:{{ nas_iscsi_port }}
+      register: iscsi_discovery
+      changed_when: false
+      tags: [always, preflight]
+
+    - name: Fail if no target found for this node
+      fail:
+        msg: >-
+          No iSCSI target matching '{{ ansible_hostname }}' found on {{ nas_host }}.
+          Discovered: {{ iscsi_discovery.stdout_lines }}.
+          Name your Synology targets to include the OS hostname (e.g. raspi-rasserv01),
+          or set iscsi_target_iqn as a host variable in inventory.ini.
+      when: iscsi_discovery.stdout_lines | select('search', ansible_hostname) | list | length == 0
+      tags: [always, preflight]
+
+    - name: Pre-flight passed
+      debug:
+        msg: "Target found for {{ ansible_hostname }}: {{ iscsi_discovery.stdout_lines | select('search', ansible_hostname) | first | split() | last }}"
+      tags: [always, preflight]
+
+
+# ── Main setup ────────────────────────────────────────────────────────────────
+- name: Configure iSCSI block storage for Raspberry Pi nodes
+  hosts: raspservers
+  become: yes
+  vars:
+    # nas_host, nas_iscsi_port, iscsi_mount_point, iscsi_initiator_prefix
+    # are all set in inventory.ini — the entries below are derived from them.
+
+    # Full initiator IQN for this node, e.g. iqn.2024-01.lab.raspi:rasserv01
+    iscsi_initiator_iqn: "{{ iscsi_initiator_prefix }}:{{ ansible_hostname }}"
+
+    # systemd unit name derived from iscsi_mount_point:
+    #   /mnt/storage  →  mnt-storage.mount
+    iscsi_mount_unit: "{{ iscsi_mount_point | regex_replace('^/', '') | replace('/', '-') }}.mount"
+
+    # Filesystem label written during mkfs (helps identify the device later)
+    iscsi_fs_label: "k8s-{{ ansible_hostname }}"
+
+  tasks:
+    # ── Stage 1: iSCSI client ─────────────────────────────────────────────────
+    - name: Install open-iscsi and supporting tools
+      apt:
+        name:
+          - open-iscsi
+          - util-linux    # blkid, lsblk
+        state: present
+        update_cache: yes
+      tags: [iscsi_client]
+
+    - name: Set unique iSCSI initiator IQN for this node
+      lineinfile:
+        path: /etc/iscsi/initiatorname.iscsi
+        regexp: '^InitiatorName='
+        line: "InitiatorName={{ iscsi_initiator_iqn }}"
+      tags: [iscsi_client]
+
+    - name: Configure iSCSI daemon for automatic node startup
+      lineinfile:
+        path: /etc/iscsi/iscsid.conf
+        regexp: '^node\.startup'
+        line: 'node.startup = automatic'
+      tags: [iscsi_client]
+
+    # Increase login timeout so disk-hibernating NAS has time to spin up (default 15s
+    # is often shorter than HDD spinup time). 120s covers even slow wakeup.
+    - name: Increase iSCSI login timeout to survive NAS wakeup delay
+      lineinfile:
+        path: /etc/iscsi/iscsid.conf
+        regexp: '^node\.conn\[0\]\.timeo\.login_timeout'
+        line: 'node.conn[0].timeo.login_timeout = 120'
+      tags: [iscsi_client]
+
+    # Systemd unit that blocks open-iscsi until the NAS is reachable on its iSCSI port.
+    # Covers both disk hibernation (NAS network is up, disks spinning up) and full
+    # hibernation (WoL or manual wake needed — this just waits until it responds).
+    - name: Install NAS connectivity wait service
+      copy:
+        dest: /etc/systemd/system/nas-wait.service
+        content: |
+          [Unit]
+          Description=Wait for NAS iSCSI port to be reachable
+          Before=open-iscsi.service
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/bin/bash -c \
+            'until nc -zw3 {{ nas_host }} {{ nas_iscsi_port }} 2>/dev/null; do \
+               echo "Waiting for NAS {{ nas_host }}:{{ nas_iscsi_port }}..."; \
+               sleep 5; \
+             done; \
+             echo "NAS reachable."'
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: "0644"
+      notify: [Reload systemd, Enable nas-wait]
+      tags: [iscsi_client]
+
+    - name: Add nas-wait dependency drop-in for open-iscsi
+      file:
+        path: /etc/systemd/system/open-iscsi.service.d
+        state: directory
+        mode: "0755"
+      tags: [iscsi_client]
+
+    - name: Make open-iscsi require nas-wait before starting
+      copy:
+        dest: /etc/systemd/system/open-iscsi.service.d/nas-wait.conf
+        content: |
+          [Unit]
+          After=nas-wait.service
+          Requires=nas-wait.service
+        mode: "0644"
+      notify: [Reload systemd]
+      tags: [iscsi_client]
+
+    - name: Enable and start iSCSI daemon
+      service:
+        name: iscsid
+        enabled: yes
+        state: started
+      tags: [iscsi_client]
+
+    - name: Enable open-iscsi service (handles login on boot)
+      service:
+        name: open-iscsi
+        enabled: yes
+        state: started
+      tags: [iscsi_client]
+
+    # ── Stage 2: discover target + login ─────────────────────────────────────
+    - name: Discover iSCSI targets on NAS
+      command: iscsiadm -m discovery -t sendtargets -p {{ nas_host }}:{{ nas_iscsi_port }}
+      register: iscsi_discovery
+      changed_when: false
+      tags: [iscsi_connect]
+
+    # Discovery output lines look like:
+    #   192.168.50.100:3260,1 iqn.2000-01.com.synology:diskstation.raspi-rasserv01.abc123
+    # We match on ansible_hostname (OS hostname) so Synology target names must contain it.
+    # split()[1] extracts the IQN (second token) from the "<address> <IQN>" line.
+    - name: Extract target IQN for this node from discovery results
+      set_fact:
+        iscsi_target_iqn: "{{ iscsi_discovery.stdout_lines | select('search', ansible_hostname) | first | split() | last | trim }}"
+      tags: [iscsi_connect]
+
+    - name: Fail with helpful message if no matching target found
+      fail:
+        msg: >-
+          No iSCSI target containing '{{ ansible_hostname }}' found on {{ nas_host }}.
+          Discovery returned: {{ iscsi_discovery.stdout_lines }}.
+          Either name your Synology targets to include the OS hostname (e.g. 'raspi-rasserv01'),
+          or set iscsi_target_iqn as a host variable in inventory.ini.
+      when: iscsi_target_iqn == ''
+      tags: [iscsi_connect]
+
+    - name: Check whether already logged into this target
+      command: iscsiadm -m session
+      register: iscsi_sessions
+      failed_when: false
+      changed_when: false
+      tags: [iscsi_connect]
+
+    - name: Login to iSCSI target
+      command: >
+        iscsiadm -m node
+          -T {{ iscsi_target_iqn }}
+          -p {{ nas_host }}:{{ nas_iscsi_port }}
+          --login
+      when: iscsi_target_iqn not in iscsi_sessions.stdout
+      tags: [iscsi_connect]
+
+    # /dev/disk/by-path/ contains stable IQN-named symlinks as soon as the session
+    # is up — more reliable than parsing iscsiadm text output (format varies by version).
+    # Filter out -partN entries so we get the whole-disk device only.
+    - name: Wait for iSCSI block device to appear in /dev
+      shell: |
+        find /dev/disk/by-path/ -name "*{{ iscsi_target_iqn }}*" ! -name "*-part*" \
+          -exec readlink -f {} \; 2>/dev/null | head -1
+      register: iscsi_device_raw
+      until: iscsi_device_raw.stdout != ''
+      retries: 12
+      delay: 5
+      changed_when: false
+      tags: [iscsi_connect]
+
+    - name: Set iSCSI block device path fact
+      set_fact:
+        iscsi_device: "{{ iscsi_device_raw.stdout | trim }}"
+      tags: [iscsi_connect]
+
+    - name: Check whether device already has a filesystem
+      command: blkid {{ iscsi_device }}
+      register: blkid_result
+      failed_when: false
+      changed_when: false
+      tags: [iscsi_connect]
+
+    # mkfs only runs if blkid found no filesystem (rc != 0 means no signature)
+    - name: Format iSCSI device with ext4
+      command: mkfs.ext4 -L {{ iscsi_fs_label }} {{ iscsi_device }}
+      when: blkid_result.rc != 0
+      tags: [iscsi_connect]
+
+    # ── Stage 3: stable fstab mount via UUID ──────────────────────────────────
+    # Two-step lookup so this stage is self-contained (no dependency on iscsi_connect
+    # set_facts). blkid -L returns the device path; a second blkid call gets the UUID.
+    # Note: blkid -L <label> is a "lookup" mode that ignores -s/-o output format flags,
+    # so combining them in one command returns the device path, not the UUID.
+    - name: Find iSCSI device by filesystem label
+      command: blkid -L {{ iscsi_fs_label }}
+      register: iscsi_device_by_label
+      changed_when: false
+      tags: [iscsi_mount]
+
+    - name: Get filesystem UUID of iSCSI device
+      command: blkid -s UUID -o value {{ iscsi_device_by_label.stdout | trim }}
+      register: iscsi_uuid
+      changed_when: false
+      tags: [iscsi_mount]
+
+    - name: Create mount point directory
+      file:
+        path: "{{ iscsi_mount_point }}"
+        state: directory
+        mode: "0755"
+      tags: [iscsi_mount]
+
+    - name: Add iSCSI volume to /etc/fstab and mount it
+      mount:
+        path: "{{ iscsi_mount_point }}"
+        src: "UUID={{ iscsi_uuid.stdout | trim }}"
+        fstype: ext4
+        # _netdev                     — mount after network is up
+        # x-systemd.requires          — wait for open-iscsi login before mounting
+        # x-systemd.mount-timeout-sec — 0 = wait indefinitely (NAS may be waking up)
+        # No nofail: kubelet/CRI-O must not start until this mount succeeds.
+        #            nas-wait.service ensures boot still completes for SSH etc.
+        opts: "defaults,_netdev,x-systemd.requires=open-iscsi.service,x-systemd.mount-timeout-sec=0"
+        state: mounted
+      tags: [iscsi_mount]
+
+    # ── Stage 4: NAS hibernation keepalive ────────────────────────────────────
+    - name: Install iSCSI keepalive service
+      copy:
+        dest: /etc/systemd/system/iscsi-keepalive.service
+        content: |
+          [Unit]
+          Description=iSCSI volume keepalive — prevents NAS hibernation
+          ConditionPathIsMountPoint={{ iscsi_mount_point }}
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/bin/touch {{ iscsi_mount_point }}/.keepalive
+        mode: "0644"
+      notify: [Reload systemd]
+      tags: [iscsi_keepalive]
+
+    - name: Install iSCSI keepalive timer
+      copy:
+        dest: /etc/systemd/system/iscsi-keepalive.timer
+        content: |
+          [Unit]
+          Description=Periodically touch iSCSI volume to prevent NAS hibernation
+
+          [Timer]
+          OnBootSec=2min
+          OnUnitActiveSec={{ iscsi_keepalive_interval }}
+
+          [Install]
+          WantedBy=timers.target
+        mode: "0644"
+      notify: [Reload systemd, Enable iscsi-keepalive]
+      tags: [iscsi_keepalive]
+
+  handlers:
+    - name: Reload systemd
+      command: systemctl daemon-reload
+
+    - name: Enable nas-wait
+      service:
+        name: nas-wait
+        enabled: yes
+        state: started
+
+    - name: Enable iscsi-keepalive
+      service:
+        name: iscsi-keepalive.timer
+        enabled: yes
+        state: started

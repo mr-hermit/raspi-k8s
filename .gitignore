@@ -1,0 +1,33 @@
+# ── Ansible ───────────────────────────────────────────────────────────────────
+*.retry
+inventory.ini
+.vault_pass
+.vault_pass.txt
+*.vault
+
+# ── Terraform ─────────────────────────────────────────────────────────────────
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+*.tfplan
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Editors ───────────────────────────────────────────────────────────────────
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc

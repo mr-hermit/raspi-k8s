@@ -1,0 +1,87 @@
+---
+# ingress/ingress-setup.yaml
+#
+# PURPOSE: Deploy Nginx Ingress Controller + cert-manager on the K8s cluster.
+#          Ingress gives hostname-based routing to services without managing
+#          per-service NodePorts. cert-manager issues TLS certificates automatically.
+#
+#          A self-signed ClusterIssuer is created by default — sufficient for a
+#          local lab. Extend to Let's Encrypt ACME when exposing externally.
+#
+# RUN AFTER k8s/k8s-setup.yaml
+#
+# USAGE:
+#   ansible-playbook -i inventory.ini ingress/ingress-setup.yaml
+#
+# TAGS (selective execution):
+#   ingress      — install Nginx Ingress Controller
+#   cert_manager — install cert-manager + self-signed ClusterIssuer
+
+- name: Deploy Ingress Controller and cert-manager
+  hosts: control_plane
+  become: yes
+
+  tasks:
+    # ── Nginx Ingress Controller ──────────────────────────────────────────────
+    - name: Add ingress-nginx Helm repository
+      become: no
+      command: helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+      tags: [ingress]
+
+    - name: Update Helm repositories
+      become: no
+      command: helm repo update
+      tags: [ingress, cert_manager]
+
+    - name: Install Nginx Ingress Controller
+      become: no
+      command: >-
+        helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx
+        --namespace ingress-nginx --create-namespace
+        --set controller.service.type=NodePort
+        --set controller.service.nodePorts.http=30080
+        --set controller.service.nodePorts.https=30443
+      tags: [ingress]
+
+    - name: Wait for Ingress Controller to become ready
+      become: no
+      command: kubectl rollout status deployment/ingress-nginx-controller -n ingress-nginx --timeout=120s
+      changed_when: false
+      tags: [ingress]
+
+    - name: Show Ingress Controller NodePorts
+      debug:
+        msg: "Ingress: http://{{ ansible_host }}:30080  https://{{ ansible_host }}:30443"
+      tags: [ingress]
+
+    # ── cert-manager ──────────────────────────────────────────────────────────
+    - name: Add cert-manager (jetstack) Helm repository
+      become: no
+      command: helm repo add jetstack https://charts.jetstack.io
+      tags: [cert_manager]
+
+    - name: Install cert-manager
+      become: no
+      command: >-
+        helm upgrade --install cert-manager jetstack/cert-manager
+        --namespace cert-manager --create-namespace
+        --set crds.enabled=true
+      tags: [cert_manager]
+
+    - name: Wait for cert-manager to become ready
+      become: no
+      command: kubectl rollout status deployment/cert-manager -n cert-manager --timeout=120s
+      changed_when: false
+      tags: [cert_manager]
+
+    - name: Copy self-signed ClusterIssuer manifest
+      copy:
+        src: files/cluster-issuer.yaml
+        dest: /tmp/cluster-issuer.yaml
+        mode: '0644'
+      tags: [cert_manager]
+
+    - name: Apply self-signed ClusterIssuer
+      become: no
+      command: kubectl apply -f /tmp/cluster-issuer.yaml
+      tags: [cert_manager]

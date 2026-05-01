@@ -1,0 +1,488 @@
+---
+# k8s/k8s-setup.yaml
+#
+# PURPOSE: Provision a Kubernetes 1.32 cluster (CRI-O + Calico) on all nodes.
+#
+# PREREQUISITE: run server/server-setup.yaml first.
+#               Run storage/iscsi-setup.yaml first if using iSCSI — k8s_storage
+#               detects whether the volume is mounted and configures accordingly.
+#
+# USAGE (run from project root):
+#   ansible-playbook -i inventory.ini k8s/k8s-setup.yaml
+#
+# TAGS (selective execution — skip steps you don't need):
+#   k8s_setup        — kernel config, packages, CRI-O, CNI plugins
+#   k8s_storage      — K8s dirs + bind mounts (auto-detects iSCSI)
+#   k8s_cluster_init — kubeadm init, kubeconfig, Calico CNI
+#   k8s_workers_join — join workers, label nodes
+
+- name: Raspberry Pi Kubernetes Cluster Configuration
+  hosts: raspservers
+  become: yes
+  # cni_plugins_version, iscsi_mount_point are set in inventory.ini
+  vars:
+    # systemd unit name derived from iscsi_mount_point (/mnt/storage → mnt-storage.mount)
+    iscsi_mount_unit: "{{ iscsi_mount_point | regex_replace('^/', '') | replace('/', '-') }}.mount"
+
+    # K8s heavy-write directories to move off the SD card onto iSCSI.
+    # When iSCSI is mounted each entry gets a subdirectory on the volume and a
+    # bind mount over the local path. When not mounted, local dirs are created only.
+    k8s_dirs:
+      - local_path: /var/lib/etcd
+        subdir: etcd
+        dir_mode: "0700"
+        control_plane_only: true
+      - local_path: /var/lib/crio
+        subdir: crio
+        dir_mode: "0710"
+        control_plane_only: false
+      - local_path: /var/lib/kubelet
+        subdir: kubelet
+        dir_mode: "0750"
+        control_plane_only: false
+      - local_path: /var/log/pods
+        subdir: log-pods
+        dir_mode: "0755"
+        control_plane_only: false
+      - local_path: /var/log/containers
+        subdir: log-containers
+        dir_mode: "0755"
+        control_plane_only: false
+
+  tasks:
+    # ── Stage 1: kernel, packages, CRI-O, CNI ────────────────────────────────
+    - name: Disable swap
+      command: swapoff -a
+      ignore_errors: yes
+      tags: [k8s_setup]
+
+    - name: Remove swap partitions from /etc/fstab
+      replace:
+        path: /etc/fstab
+        regexp: '^\s*([^#\s]+\s+){2}swap\s+'
+        replace: '# \g<0>'
+      notify: [Reload systemd]
+      tags: [k8s_setup]
+
+    # Load kernel modules before applying sysctl settings that depend on them
+    - name: Enable br_netfilter kernel module
+      modprobe:
+        name: br_netfilter
+      tags: [k8s_setup]
+
+    - name: Enable overlay kernel module
+      modprobe:
+        name: overlay
+      tags: [k8s_setup]
+
+    - name: Persist kernel modules across reboots
+      blockinfile:
+        path: /etc/modules-load.d/k8s.conf
+        create: yes
+        block: |
+          br_netfilter
+          overlay
+      tags: [k8s_setup]
+
+    - name: Enable IPv4 forwarding
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: 1
+        state: present
+        reload: yes
+      tags: [k8s_setup]
+
+    - name: Enable bridge-nf-call-iptables
+      sysctl:
+        name: net.bridge.bridge-nf-call-iptables
+        value: 1
+        state: present
+        reload: yes
+      tags: [k8s_setup]
+
+    - name: Enable bridge-nf-call-ip6tables
+      sysctl:
+        name: net.bridge.bridge-nf-call-ip6tables
+        value: 1
+        state: present
+        reload: yes
+      tags: [k8s_setup]
+
+    - name: Persist Kubernetes sysctl settings
+      blockinfile:
+        path: /etc/sysctl.d/k8s.conf
+        create: yes
+        block: |
+          net.ipv4.ip_forward=1
+          net.bridge.bridge-nf-call-iptables=1
+          net.bridge.bridge-nf-call-ip6tables=1
+      tags: [k8s_setup]
+
+    - name: Install pre-requisite packages
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+      tags: [k8s_setup]
+
+    - name: Download Kubernetes apt repository GPG key
+      get_url:
+        url: https://pkgs.k8s.io/core:/stable:/v1.32/deb/Release.key
+        dest: /tmp/kubernetes-apt-keyring.gpg
+        mode: '0644'
+      tags: [k8s_setup]
+
+    - name: Convert Kubernetes GPG key to apt format
+      command: gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg /tmp/kubernetes-apt-keyring.gpg
+      tags: [k8s_setup]
+
+    - name: Add Kubernetes apt repository
+      apt_repository:
+        repo: 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.32/deb/ /'
+        state: present
+        filename: kubernetes.list
+      tags: [k8s_setup]
+
+    - name: Download CRI-O apt repository GPG key
+      get_url:
+        url: https://pkgs.k8s.io/addons:/cri-o:/stable:/v1.32/deb/Release.key
+        dest: /tmp/crio-apt-keyring.gpg
+        mode: '0644'
+      tags: [k8s_setup]
+
+    - name: Convert CRI-O GPG key to apt format
+      command: gpg --dearmor --yes -o /etc/apt/keyrings/cri-o-apt-keyring.gpg /tmp/crio-apt-keyring.gpg
+      tags: [k8s_setup]
+
+    - name: Add CRI-O apt repository
+      apt_repository:
+        repo: 'deb [signed-by=/etc/apt/keyrings/cri-o-apt-keyring.gpg] https://pkgs.k8s.io/addons:/cri-o:/stable:/v1.32/deb/ /'
+        state: present
+        filename: cri-o.list
+      tags: [k8s_setup]
+
+    - name: Install Kubernetes and CRI-O packages
+      apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+          - cri-o
+        state: present
+        update_cache: yes
+      tags: [k8s_setup]
+
+    - name: Hold Kubernetes and CRI-O packages at current version
+      dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+        - cri-o
+      tags: [k8s_setup]
+
+    # Install Helm from GitHub releases — more reliable than baltocdn.com apt repo,
+    # and consistent with the CNI plugins install pattern.
+    - name: Download Helm release archive (ARM64)
+      get_url:
+        url: "https://get.helm.sh/helm-{{ helm_version }}-linux-arm64.tar.gz"
+        dest: "/tmp/helm-{{ helm_version }}-linux-arm64.tar.gz"
+        mode: "0644"
+      tags: [k8s_setup]
+
+    - name: Extract Helm binary
+      unarchive:
+        src: "/tmp/helm-{{ helm_version }}-linux-arm64.tar.gz"
+        dest: /tmp/
+        remote_src: yes
+      tags: [k8s_setup]
+
+    - name: Install Helm binary to /usr/local/bin
+      copy:
+        src: /tmp/linux-arm64/helm
+        dest: /usr/local/bin/helm
+        mode: "0755"
+        remote_src: yes
+      tags: [k8s_setup]
+
+    - name: Copy CRI-O configuration file to the server
+      copy:
+        src: files/crio/crio.conf.short
+        dest: /etc/crio/crio.conf
+        mode: '0644'
+      tags: [k8s_setup]
+
+    - name: Enable and start CRI-O service
+      service:
+        name: crio
+        enabled: yes
+        state: started
+      tags: [k8s_setup]
+
+    - name: Enable kubelet service
+      service:
+        name: kubelet
+        enabled: yes
+      tags: [k8s_setup]
+
+    # CNI plugins: download prebuilt ARM64 release archive.
+    # Building from source with build_linux.sh takes 10–15 min per node on Pi hardware.
+    - name: Create /opt/cni/bin directory
+      file:
+        path: /opt/cni/bin
+        state: directory
+        mode: "0755"
+      tags: [k8s_setup]
+
+    - name: Download CNI plugins release archive (ARM64)
+      get_url:
+        url: "https://github.com/containernetworking/plugins/releases/download/{{ cni_plugins_version }}/cni-plugins-linux-arm64-{{ cni_plugins_version }}.tgz"
+        dest: "/tmp/cni-plugins-{{ cni_plugins_version }}.tgz"
+        mode: "0644"
+      tags: [k8s_setup]
+
+    - name: Extract CNI plugins to /opt/cni/bin
+      unarchive:
+        src: "/tmp/cni-plugins-{{ cni_plugins_version }}.tgz"
+        dest: /opt/cni/bin
+        remote_src: yes
+      tags: [k8s_setup]
+
+    # ── Stage 2: K8s directory setup ─────────────────────────────────────────
+    # Must run before cluster init so kubelet's data dirs are on iSCSI from the start.
+    # Detects whether the iSCSI volume is mounted; falls back to local dirs if not.
+    - name: Detect whether iSCSI volume is mounted
+      set_fact:
+        iscsi_mounted: "{{ ansible_mounts | selectattr('mount', 'equalto', iscsi_mount_point) | list | length > 0 }}"
+      tags: [k8s_storage]
+
+    - name: Report storage mode
+      debug:
+        msg: >-
+          {{ 'iSCSI mounted at ' + iscsi_mount_point + ' — K8s dirs will use iSCSI volume'
+             if iscsi_mounted else
+             'No iSCSI mount at ' + iscsi_mount_point + ' — K8s dirs will use local storage' }}
+      tags: [k8s_storage]
+
+    # Validation: warn about existing data or symlinks before bind-mounting
+    - name: Stat K8s local paths to detect existing data or symlinks
+      stat:
+        path: "{{ item.local_path }}"
+      register: k8s_path_stat
+      loop: "{{ k8s_dirs }}"
+      when: iscsi_mounted
+      tags: [k8s_storage]
+
+    - name: Warn if a K8s path is already a symlink
+      debug:
+        msg: >-
+          WARNING: {{ item.item.local_path }} is a symlink pointing to
+          {{ item.stat.lnk_target }}. Remove it before using bind mounts.
+      loop: "{{ k8s_path_stat.results | default([]) }}"
+      when: iscsi_mounted and item.stat is defined and item.stat.islnk | default(false)
+      tags: [k8s_storage]
+
+    - name: Check for existing data that will be hidden by bind mount
+      shell: "ls -A {{ item.item.local_path }} 2>/dev/null | head -1"
+      register: path_contents
+      changed_when: false
+      loop: "{{ k8s_path_stat.results | default([]) }}"
+      when: >-
+        iscsi_mounted and
+        item.stat is defined and
+        item.stat.exists | default(false) and
+        not (item.stat.islnk | default(false)) and
+        not (ansible_mounts | selectattr('mount', 'equalto', item.item.local_path) | list)
+      tags: [k8s_storage]
+
+    - name: Print warning for paths with existing data
+      debug:
+        msg: >-
+          WARNING: {{ item.item.item.local_path }} already contains data. It will be
+          hidden (not deleted) once the bind mount is in place. Move the data to
+          {{ iscsi_mount_point }}/{{ item.item.item.subdir }} first if you need it.
+      loop: "{{ path_contents.results | default([]) }}"
+      when: iscsi_mounted and item.stdout is defined and item.stdout != ''
+      tags: [k8s_storage]
+
+    # Create local K8s directories (always — needed whether or not iSCSI is used)
+    - name: Ensure local K8s paths exist (all nodes)
+      file:
+        path: "{{ item.local_path }}"
+        state: directory
+        mode: "{{ item.dir_mode }}"
+      loop: "{{ k8s_dirs | rejectattr('control_plane_only') | list }}"
+      tags: [k8s_storage]
+
+    - name: Ensure local etcd path exists (control plane only)
+      file:
+        path: "{{ item.local_path }}"
+        state: directory
+        mode: "{{ item.dir_mode }}"
+      loop: "{{ k8s_dirs | selectattr('control_plane_only') | list }}"
+      when: "'control_plane' in group_names"
+      tags: [k8s_storage]
+
+    # iSCSI subdirs + bind mounts (only when iSCSI is mounted)
+    - name: Create K8s subdirectories on iSCSI volume (all nodes)
+      file:
+        path: "{{ iscsi_mount_point }}/{{ item.subdir }}"
+        state: directory
+        mode: "{{ item.dir_mode }}"
+      loop: "{{ k8s_dirs | rejectattr('control_plane_only') | list }}"
+      when: iscsi_mounted
+      tags: [k8s_storage]
+
+    - name: Create etcd subdirectory on iSCSI volume (control plane only)
+      file:
+        path: "{{ iscsi_mount_point }}/{{ item.subdir }}"
+        state: directory
+        mode: "{{ item.dir_mode }}"
+      loop: "{{ k8s_dirs | selectattr('control_plane_only') | list }}"
+      when: iscsi_mounted and 'control_plane' in group_names
+      tags: [k8s_storage]
+
+    - name: Configure bind mounts for K8s dirs (all nodes)
+      mount:
+        path: "{{ item.local_path }}"
+        src: "{{ iscsi_mount_point }}/{{ item.subdir }}"
+        fstype: none
+        opts: "bind,_netdev,nofail,x-systemd.requires={{ iscsi_mount_unit }}"
+        state: mounted
+      loop: "{{ k8s_dirs | rejectattr('control_plane_only') | list }}"
+      when: iscsi_mounted
+      tags: [k8s_storage]
+
+    - name: Configure etcd bind mount (control plane only)
+      mount:
+        path: "{{ item.local_path }}"
+        src: "{{ iscsi_mount_point }}/{{ item.subdir }}"
+        fstype: none
+        opts: "bind,_netdev,nofail,x-systemd.requires={{ iscsi_mount_unit }}"
+        state: mounted
+      loop: "{{ k8s_dirs | selectattr('control_plane_only') | list }}"
+      when: iscsi_mounted and 'control_plane' in group_names
+      tags: [k8s_storage]
+
+    # systemd service ordering (only when iSCSI is mounted)
+    - name: Create systemd drop-in directories for kubelet and CRI-O
+      file:
+        path: "/etc/systemd/system/{{ item }}.service.d"
+        state: directory
+        mode: "0755"
+      loop: [kubelet, crio]
+      when: iscsi_mounted
+      tags: [k8s_storage]
+
+    - name: Add iSCSI mount dependency drop-in for kubelet and CRI-O
+      copy:
+        dest: "/etc/systemd/system/{{ item }}.service.d/iscsi-dependency.conf"
+        content: |
+          [Unit]
+          After={{ iscsi_mount_unit }}
+          Requires={{ iscsi_mount_unit }}
+        mode: "0644"
+      loop: [kubelet, crio]
+      when: iscsi_mounted
+      notify: [Reload systemd]
+      tags: [k8s_storage]
+
+    # ── Stage 3: initialize cluster (control plane) ───────────────────────────
+    - name: Check if Kubernetes cluster is already initialized
+      stat:
+        path: /etc/kubernetes/admin.conf
+      register: kubeadm_conf
+      when: "'control_plane' in group_names"
+      tags: [k8s_cluster_init]
+
+    - name: Initialize Kubernetes cluster
+      command: kubeadm init --cri-socket=unix:///var/run/crio/crio.sock --pod-network-cidr=10.244.0.0/16
+      when: "'control_plane' in group_names and not kubeadm_conf.stat.exists"
+      run_once: yes
+      tags: [k8s_cluster_init]
+
+    - name: Create .kube directory in user's home directory
+      file:
+        path: /home/{{ ansible_user }}/.kube
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+      when: "'control_plane' in group_names"
+      tags: [k8s_cluster_init]
+
+    - name: Copy kubeconfig to user's home directory
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/{{ ansible_user }}/.kube/config
+        remote_src: yes
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0644'
+      when: "'control_plane' in group_names"
+      tags: [k8s_cluster_init]
+
+    - name: Install Calico tigera operator
+      become: no
+      command: kubectl apply --server-side --force-conflicts -f https://raw.githubusercontent.com/projectcalico/calico/v3.29.1/manifests/tigera-operator.yaml
+      when: "'control_plane' in group_names"
+      run_once: yes
+      tags: [k8s_cluster_init]
+
+    - name: Download Calico custom resources manifest
+      get_url:
+        url: https://raw.githubusercontent.com/projectcalico/calico/v3.29.1/manifests/custom-resources.yaml
+        dest: /opt/cni/calico.yaml
+        mode: '0644'
+      when: "'control_plane' in group_names"
+      run_once: yes
+      tags: [k8s_cluster_init]
+
+    - name: Update POD network CIDR in Calico manifest
+      replace:
+        path: /opt/cni/calico.yaml
+        regexp: 'cidr: .*'
+        replace: 'cidr: 10.244.0.0/16'
+      when: "'control_plane' in group_names"
+      run_once: yes
+      tags: [k8s_cluster_init]
+
+    - name: Apply Calico CNI plugin
+      become: no
+      command: kubectl apply -f /opt/cni/calico.yaml
+      when: "'control_plane' in group_names"
+      run_once: yes
+      tags: [k8s_cluster_init]
+
+    # ── Stage 4: join worker nodes ────────────────────────────────────────────
+    - name: Generate join command for worker nodes
+      become: no
+      command: kubeadm token create --print-join-command
+      when: "'control_plane' in group_names"
+      register: join_command
+      run_once: yes
+      tags: [k8s_workers_join]
+
+    - name: Join worker nodes to the cluster
+      command: "{{ hostvars[groups['control_plane'][0]].join_command.stdout }} --cri-socket=unix:///var/run/crio/crio.sock"
+      when: "'worker_node' in group_names"
+      tags: [k8s_workers_join]
+
+    - name: Set label for worker nodes
+      become: no
+      command: kubectl label node {{ hostvars[host].ansible_hostname }} node-role.kubernetes.io/worker=worker --overwrite
+      loop: "{{ groups['worker_node'] }}"
+      loop_control:
+        loop_var: host
+      when: "'control_plane' in group_names"
+      tags:
+        - k8s_workers_join
+        - k8s_workers_label
+
+  handlers:
+    - name: Reload systemd
+      command: systemctl daemon-reload

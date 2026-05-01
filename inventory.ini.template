@@ -1,0 +1,52 @@
+# inventory.ini.template — copy to inventory.ini and fill in your values
+#
+#   cp inventory.ini.template inventory.ini
+#
+# inventory.ini is git-ignored so your credentials stay local.
+# Encrypt sensitive values with: ansible-vault encrypt inventory.ini
+
+[all:vars]
+ansible_user=<ssh-username>
+ansible_password=<ssh-password>            # encrypt with ansible-vault
+ansible_become_pass=<sudo-password>        # encrypt with ansible-vault
+# Ubuntu's newer sudo restricts output visibility to Ansible — sudo.ws works around it
+ansible_sudo_exe=sudo.ws
+
+# ── Server setup ──────────────────────────────────────────────────────────────
+# Path to the SSH public key installed on every node during server-setup.yaml
+ssh_public_key_path=~/.ssh/id_ed25519.pub
+
+# ── iSCSI / Storage ───────────────────────────────────────────────────────────
+nas_host=diskstation                        # Synology hostname or IP
+nas_iscsi_port=3260
+iscsi_mount_point=/mnt/storage
+iscsi_initiator_prefix=iqn.2024-01.lab.raspi
+# Keepalive interval — must be less than half the NAS hibernation timeout
+# e.g. NAS set to 20 min inactivity → use 5min or less
+iscsi_keepalive_interval=5min
+
+# ── Kubernetes ────────────────────────────────────────────────────────────────
+# GitHub release tags — ARM64 binaries are downloaded directly
+cni_plugins_version=v1.6.0
+helm_version=v3.17.3
+
+# ── Registry ──────────────────────────────────────────────────────────────────
+registry_nodeport=30500                     # NodePort exposed on every cluster node
+registry_storage_path=/mnt/storage/registry
+registry_storage_size=50Gi
+
+# ── Hosts ─────────────────────────────────────────────────────────────────────
+# Use static IP addresses for ansible_host to avoid DNS dependency during setup.
+# The hostname of each Pi (set during imaging) must match ansible_host if
+# ansible_host is a name, or match the Pi's OS hostname if ansible_host is an IP.
+
+[control_plane]
+control-plane-node ansible_host=192.168.1.101
+
+[worker_node]
+worker_node_1 ansible_host=192.168.1.102
+worker_node_2 ansible_host=192.168.1.103
+
+[raspservers:children]
+control_plane
+worker_node

@@ -1,0 +1,91 @@
+---
+# dashboard/dashboard-setup.yaml
+#
+# PURPOSE: Deploy Headlamp — a lightweight Kubernetes web UI (~60MB RAM).
+#          Chosen over the official K8s Dashboard (~200MB) to leave more
+#          resources available for actual workloads on Pi hardware.
+#
+# RUN AFTER k8s/k8s-setup.yaml
+# OPTIONAL: run ingress/ingress-setup.yaml first for hostname-based access.
+#
+# USAGE:
+#   ansible-playbook -i inventory.ini dashboard/dashboard-setup.yaml
+#
+# ACCESS:
+#   NodePort: http://<any-node-ip>:30100
+#   Ingress (if installed): http://headlamp.local:30080
+#
+# TAGS (selective execution):
+#   headlamp         — install Headlamp
+#   headlamp_ingress — apply Ingress resource (requires ingress-setup.yaml)
+
+- name: Deploy Headlamp Kubernetes dashboard
+  hosts: control_plane
+  become: yes
+
+  tasks:
+    - name: Add Headlamp Helm repository
+      become: no
+      command: helm repo add headlamp https://headlamp-k8s.github.io/headlamp/
+      tags: [headlamp]
+
+    - name: Update Helm repositories
+      become: no
+      command: helm repo update
+      tags: [headlamp]
+
+    - name: Install Headlamp
+      become: no
+      command: >-
+        helm upgrade --install headlamp headlamp/headlamp
+        --namespace headlamp --create-namespace
+        --set service.type=NodePort
+        --set service.nodePort=30100
+      tags: [headlamp]
+
+    - name: Wait for Headlamp to become ready
+      become: no
+      command: kubectl rollout status deployment/headlamp -n headlamp --timeout=120s
+      changed_when: false
+      tags: [headlamp]
+
+    - name: Show Headlamp access URL
+      debug:
+        msg: "Headlamp: http://{{ ansible_host }}:30100"
+      tags: [headlamp]
+
+    # ── Ingress resource (optional — only useful after ingress-setup.yaml) ────
+    - name: Copy Headlamp Ingress manifest
+      copy:
+        dest: /tmp/headlamp-ingress.yaml
+        content: |
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: headlamp
+            namespace: headlamp
+            annotations:
+              cert-manager.io/cluster-issuer: selfsigned
+          spec:
+            ingressClassName: nginx
+            tls:
+              - hosts: [headlamp.local]
+                secretName: headlamp-tls
+            rules:
+              - host: headlamp.local
+                http:
+                  paths:
+                    - path: /
+                      pathType: Prefix
+                      backend:
+                        service:
+                          name: headlamp
+                          port:
+                            number: 4466
+        mode: '0644'
+      tags: [headlamp_ingress]
+
+    - name: Apply Headlamp Ingress
+      become: no
+      command: kubectl apply -f /tmp/headlamp-ingress.yaml
+      tags: [headlamp_ingress]
