@@ -27,7 +27,16 @@ select *Other general-purpose OS → Ubuntu → Ubuntu Server 26.04 LTS (64-bit)
 raspi/
 ├── ansible.cfg          Ansible configuration (picked up automatically)
 ├── inventory.ini        All hosts + shared variables
-├── healthcheck.sh       Cluster health check — run from your control machine
+├── scripts/
+│   ├── healthcheck.sh          Cluster health check — run from your control machine
+│   ├── shutdown.sh             Graceful shutdown — drains workers then powers off all nodes
+│   ├── iscsi-troubleshoot.sh   iSCSI post-power-cycle diagnostics and recovery
+│   └── generate-lab-context.py Generate LAB-CONTEXT.md from inventory.ini
+│
+├── test/
+│   └── lab-test.sh             Integration tests — provisions PVC, deploys service, tests ingress
+│
+├── LAB-CONTEXT.md              AI/assistant context snapshot (git-ignored, generated)
 │
 ├── server/              Phase 0 — OS baseline (run first on any fresh node)
 │   ├── README.md
@@ -45,12 +54,13 @@ raspi/
 │       ├── cni/
 │       └── services/
 │
-└── addons/              Phases 3-6 — Optional K8s components (install per component)
+└── addons/              Phases 3-8 — Optional K8s components (install per component)
     ├── monitoring/      Phase 3 — Metrics Server + Prometheus + Grafana + Loki
     │   ├── README.md
     │   ├── monitoring-setup.yaml
     │   └── files/
-    │       └── grafana-service.yaml
+    │       ├── grafana-service.yaml
+    │       └── grafana-ingress.yaml
     │
     ├── ingress/         Phase 4 — Nginx Ingress Controller + cert-manager
     │   ├── README.md
@@ -62,18 +72,34 @@ raspi/
     │   ├── README.md
     │   └── dashboard-setup.yaml
     │
-    └── registry/        Phase 6 — Private container registry on K8s
+    ├── registry/        Phase 6 — Private container registry on K8s
+    │   ├── README.md
+    │   ├── registry-setup.yaml
+    │   └── files/
+    │       └── registry.yaml.j2
+    │
+    ├── longhorn/        Phase 7 — Longhorn distributed block storage (default StorageClass)
+    │   ├── README.md
+    │   └── longhorn-setup.yaml
+    │
+    └── synology-csi/    Phase 8 — Synology CSI driver (NAS-provisioned iSCSI LUNs per PVC)
         ├── README.md
-        ├── registry-setup.yaml
+        ├── synology-csi-setup.yaml
         └── files/
-            └── registry.yaml.j2
+            ├── client-info.yml.j2
+            └── storageclass-iscsi.yaml.j2
 
-terraform/               Phase 7 — Deploy workloads to K8s with Terraform
-├── README.md            → Module reference + workflow guide
-├── modules/
-│   └── raspi-k8s/       → Reusable module: Deployment + Service (+ optional PV/PVC)
-└── environments/
-    └── raspi/           → Live environment — add one module block per service
+templates/               Reusable Terraform modules and helper scripts (copy into your own repo)
+├── README.md
+├── LAB-CONTEXT.md.template   → Template for generating AI/assistant context
+├── scripts/
+│   └── build-push.sh         → Build ARM64 image and push to the lab registry
+└── terraform/
+    ├── modules/
+    │   └── raspi-k8s/        → Umbrella module: Deployment + Service + optional PVC/Ingress
+    └── examples/
+        ├── simple-web-app/   → Nginx + Ingress example
+        └── postgres-synology/ → PostgreSQL with synology-iscsi PVC
 ```
 
 ## Before you start
@@ -122,16 +148,23 @@ ansible-playbook -i inventory.ini addons/monitoring/monitoring-setup.yaml
 ansible-playbook -i inventory.ini addons/ingress/ingress-setup.yaml
 ansible-playbook -i inventory.ini addons/dashboard/dashboard-setup.yaml
 ansible-playbook -i inventory.ini addons/registry/registry-setup.yaml
+ansible-playbook -i inventory.ini addons/longhorn/longhorn-setup.yaml
+ansible-playbook -i inventory.ini addons/synology-csi/synology-csi-setup.yaml
 
 # Copy kubeconfig to your control machine
 scp hermit@rasserv01:~/.kube/config ~/.kube/config-raspi
 
 # Validate the cluster
-./healthcheck.sh
+./scripts/healthcheck.sh
 
-# Deploy your workloads with Terraform
-cd terraform/environments/raspi
-terraform init && terraform apply
+# Run integration tests (provisions PVC, deploys service, tests ingress)
+./test/lab-test.sh
+
+# Generate AI/assistant context file
+python scripts/generate-lab-context.py
+
+# Deploy workloads with Terraform — copy templates into your own repo first
+# See templates/README.md
 ```
 
 Each playbook supports tags for running individual stages — useful when re-running
@@ -139,7 +172,7 @@ a specific step or skipping parts you don't need. See the README in each directo
 
 ## Requirements
 
-- Terraform ≥ 1.6 on your control machine
+- Terraform ≥ 1.3 on your control machine
 - Ansible 2.14+ and Python 3.9+ on your control machine (`pip install ansible`)
 - Ubuntu Server 26.04 LTS (64-bit) flashed on each Pi, SSH enabled
 - Synology DSM 7+ with SAN Manager package installed (only if using iSCSI storage)
@@ -163,4 +196,6 @@ ansible-vault encrypt inventory.ini
 - [addons/ingress/README.md](addons/ingress/README.md) — Nginx Ingress Controller + cert-manager
 - [addons/dashboard/README.md](addons/dashboard/README.md) — Headlamp K8s web UI
 - [addons/registry/README.md](addons/registry/README.md) — Private container registry
-- [terraform/README.md](terraform/README.md) — Terraform module reference and workflow
+- [addons/longhorn/README.md](addons/longhorn/README.md) — Longhorn distributed block storage
+- [addons/synology-csi/README.md](addons/synology-csi/README.md) — Synology CSI driver (NAS-provisioned LUNs)
+- [templates/README.md](templates/README.md) — Terraform templates and build/push script

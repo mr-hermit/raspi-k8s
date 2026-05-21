@@ -1,0 +1,12 @@
+kubeconfig_path    = "~/.kube/config-raspi"
+kubeconfig_context = ""
+
+namespace = "database"
+
+app_name = "postgres"
+image    = "postgres:16-alpine"
+
+postgres_db           = "appdb"
+postgres_user         = "appuser"
+postgres_password     = "change-me"
+postgres_storage_size = "20Gi"

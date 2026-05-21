@@ -1,0 +1,7 @@
+kubeconfig_path    = "~/.kube/config-raspi"
+kubeconfig_context = ""
+
+namespace    = "web"
+app_name     = "web-app"
+image        = "nginx:1.27-alpine"
+ingress_host = "web.raspi.local"

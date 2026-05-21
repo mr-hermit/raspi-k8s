@@ -13,6 +13,7 @@
 #   metrics_server — install Metrics Server (kubectl top, HPA)
 #   prometheus     — add Helm repo, install kube-prometheus-stack
 #   grafana        — apply Grafana NodePort service
+#   grafana_ingress — apply Grafana Ingress (requires ingress-setup.yaml)
 #   loki           — install Loki + Promtail (log aggregation)
 
 - name: Deploy monitoring stack to K8s
@@ -78,6 +79,25 @@
       debug:
         msg: "Grafana: http://{{ ansible_host }}:32000  (default login: admin / prom-operator)"
       tags: [grafana]
+
+    # ── Grafana Ingress ───────────────────────────────────────────────────────
+    # Requires ingress-setup.yaml to have been run first.
+    - name: Copy Grafana Ingress manifest
+      copy:
+        src: files/grafana-ingress.yaml
+        dest: /tmp/grafana-ingress.yaml
+        mode: '0644'
+      tags: [grafana_ingress]
+
+    - name: Apply Grafana Ingress
+      become: no
+      command: kubectl apply -f /tmp/grafana-ingress.yaml
+      tags: [grafana_ingress]
+
+    - name: Show Grafana Ingress access URL
+      debug:
+        msg: "Grafana via Ingress: https://grafana.local:30443  (add grafana.local -> {{ ansible_host }} to /etc/hosts)"
+      tags: [grafana_ingress]
 
     # ── Loki + Promtail ───────────────────────────────────────────────────────
     # Loki stores logs; Promtail runs on every node and ships logs to Loki.

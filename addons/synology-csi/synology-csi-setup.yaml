@@ -1,0 +1,172 @@
+---
+# addons/synology-csi/synology-csi-setup.yaml
+#
+# PURPOSE: Deploy the Synology CSI driver so the K8s cluster can provision iSCSI
+#          LUNs directly on the NAS via the DSM API.  Each PVC backed by the
+#          synology-iscsi StorageClass results in a new dedicated LUN created on
+#          the NAS — no manual NAS configuration needed per volume.
+#
+#          The driver authenticates to DSM over HTTP(S) using the credentials in
+#          nas_dsm_username / nas_dsm_password (inventory.ini).  Those credentials
+#          need Create/Delete LUN permission in DSM → Storage Manager → iSCSI.
+#
+# RUN AFTER k8s/k8s-setup.yaml
+# (storage/iscsi-setup.yaml is NOT required — this is independent of the
+#  per-node iSCSI mounts used for local-storage and Longhorn)
+#
+# USAGE:
+#   ansible-playbook -i inventory.ini addons/synology-csi/synology-csi-setup.yaml
+#
+# TAGS (selective execution):
+#   csi_prereqs    — install open-iscsi on every node (CSI node plugin requirement)
+#   csi_deploy     — download manifests, create namespace, apply driver resources
+#   csi_secret     — (re)create the client-info secret; run alone after cred changes
+#   csi_storageclass — apply the synology-iscsi StorageClass
+
+# ── Play 1: Every node needs open-iscsi for the CSI node plugin ───────────────
+- name: Prepare nodes for Synology CSI
+  hosts: raspservers
+  become: yes
+
+  tasks:
+    # The CSI node plugin issues iscsiadm commands to attach NAS-provisioned LUNs
+    # to the node when a pod mounts a Synology-backed PVC.
+    - name: Ensure open-iscsi is installed
+      apt:
+        name: open-iscsi
+        state: present
+        update_cache: yes
+      tags: [csi_prereqs]
+
+    - name: Ensure iSCSI daemon is running
+      service:
+        name: iscsid
+        enabled: yes
+        state: started
+      tags: [csi_prereqs]
+
+
+# ── Play 2: Deploy CSI driver to K8s ─────────────────────────────────────────
+- name: Deploy Synology CSI driver to K8s
+  hosts: control_plane
+  become: yes
+  vars:
+    csi_namespace: synology-csi
+    # GitHub archive extracts to synology-csi-<version-without-v>/
+    csi_extract_dir: "/tmp/synology-csi-{{ synology_csi_version | regex_replace('^v', '') }}"
+    # v1.1.3 ships v1.19 and v1.20 manifests — v1.20 is compatible with K8s 1.32
+    csi_manifest_dir: "{{ csi_extract_dir }}/deploy/kubernetes/v1.20"
+    csi_client_info_tmp: /tmp/synology-csi-client-info.yml
+
+  tasks:
+    # ── Namespace ─────────────────────────────────────────────────────────────
+    - name: Create synology-csi namespace
+      become: no
+      command: kubectl create namespace {{ csi_namespace }} --dry-run=client -o yaml
+      register: ns_yaml
+      changed_when: false
+      tags: [csi_deploy, csi_secret]
+
+    - name: Apply namespace
+      become: no
+      shell: echo "{{ ns_yaml.stdout }}" | kubectl apply -f -
+      changed_when: false
+      tags: [csi_deploy, csi_secret]
+
+    # ── Client-info secret ────────────────────────────────────────────────────
+    # Rendered to a temp file so the secret can be created/updated idempotently
+    # with --dry-run | kubectl apply.  The temp file is removed after use.
+    - name: Remove stale client-info temp file
+      file:
+        path: "{{ csi_client_info_tmp }}"
+        state: absent
+      tags: [csi_deploy, csi_secret]
+
+    - name: Render client-info credentials to temp file
+      become: no
+      template:
+        src: files/client-info.yml.j2
+        dest: "{{ csi_client_info_tmp }}"
+        mode: "0600"
+      tags: [csi_deploy, csi_secret]
+
+    - name: Create or update client-info secret
+      become: no
+      shell: >-
+        kubectl create secret generic client-info-secret
+        --from-file=client-info.yml={{ csi_client_info_tmp }}
+        --namespace={{ csi_namespace }}
+        --dry-run=client -o yaml | kubectl apply -f -
+      changed_when: true
+      tags: [csi_deploy, csi_secret]
+
+    - name: Remove temp credentials file
+      file:
+        path: "{{ csi_client_info_tmp }}"
+        state: absent
+      tags: [csi_deploy, csi_secret]
+
+    # ── Download and apply driver manifests ───────────────────────────────────
+    - name: Download Synology CSI release archive
+      get_url:
+        url: "https://github.com/SynologyOpenSource/synology-csi/archive/refs/tags/{{ synology_csi_version }}.tar.gz"
+        dest: "/tmp/synology-csi-{{ synology_csi_version }}.tar.gz"
+        mode: "0644"
+      tags: [csi_deploy]
+
+    - name: Extract release archive
+      unarchive:
+        src: "/tmp/synology-csi-{{ synology_csi_version }}.tar.gz"
+        dest: /tmp/
+        remote_src: yes
+        creates: "{{ csi_extract_dir }}"
+      tags: [csi_deploy]
+
+    - name: Apply CSI driver manifests (RBAC, CSIDriver, controller, node DaemonSet)
+      become: no
+      command: kubectl apply -f {{ csi_manifest_dir }}/
+      tags: [csi_deploy]
+
+    - name: Wait for CSI controller StatefulSet to roll out
+      become: no
+      command: kubectl rollout status statefulset/synology-csi-controller -n {{ csi_namespace }} --timeout=120s
+      changed_when: false
+      tags: [csi_deploy]
+
+    - name: Wait for CSI node DaemonSet to roll out
+      become: no
+      command: kubectl rollout status daemonset/synology-csi-node -n {{ csi_namespace }} --timeout=120s
+      changed_when: false
+      tags: [csi_deploy]
+
+    # ── StorageClass ──────────────────────────────────────────────────────────
+    - name: Remove stale StorageClass temp file
+      file:
+        path: /tmp/synology-csi-storageclass.yaml
+        state: absent
+      tags: [csi_deploy, csi_storageclass]
+
+    - name: Render synology-iscsi StorageClass
+      become: no
+      template:
+        src: files/storageclass-iscsi.yaml.j2
+        dest: /tmp/synology-csi-storageclass.yaml
+        mode: "0644"
+      tags: [csi_deploy, csi_storageclass]
+
+    - name: Apply synology-iscsi StorageClass
+      become: no
+      command: kubectl apply -f /tmp/synology-csi-storageclass.yaml
+      tags: [csi_deploy, csi_storageclass]
+
+    - name: Show driver status
+      become: no
+      command: kubectl get pods -n {{ csi_namespace }}
+      register: csi_pods
+      changed_when: false
+      tags: [csi_deploy]
+
+    - name: Print driver status
+      debug:
+        msg: "{{ csi_pods.stdout_lines }}"
+      tags: [csi_deploy]

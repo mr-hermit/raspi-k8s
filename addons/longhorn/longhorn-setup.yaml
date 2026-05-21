@@ -1,0 +1,133 @@
+---
+# addons/longhorn/longhorn-setup.yaml
+#
+# PURPOSE: Deploy Longhorn distributed block storage on the K8s cluster.
+#
+#          Longhorn stores volume replicas under longhorn_data_path on each node.
+#          That path must sit on the iSCSI mount (/mnt/storage), not the Pi's SD
+#          card — run storage/iscsi-setup.yaml first to ensure the mount is live.
+#
+#          After this playbook, Longhorn becomes the default StorageClass. PVCs
+#          without an explicit storageClassName will use Longhorn (2 replicas,
+#          spread across nodes). The existing local-storage class is unaffected
+#          and can still be referenced explicitly.
+#
+# RUN AFTER storage/iscsi-setup.yaml and k8s/k8s-setup.yaml
+#
+# USAGE:
+#   ansible-playbook -i inventory.ini addons/longhorn/longhorn-setup.yaml
+#
+# TAGS (selective execution):
+#   longhorn_prereqs  — install OS packages, load kernel module, create data dir
+#   longhorn_deploy   — add Helm repo, install Longhorn, wait for readiness
+
+# ── Play 1: Prepare every node ────────────────────────────────────────────────
+- name: Prepare nodes for Longhorn
+  hosts: raspservers
+  become: yes
+
+  tasks:
+    - name: Install Longhorn node dependencies
+      apt:
+        name:
+          - open-iscsi    # iSCSI initiator — already present from storage setup, ensured here
+          - nfs-common    # required for Longhorn RWX volumes (Longhorn uses NFS internally for RWX)
+          - util-linux    # lsblk, used by Longhorn node agent for disk discovery
+        state: present
+        update_cache: yes
+      tags: [longhorn_prereqs]
+
+    # Longhorn uses the iscsi_tcp module to attach virtual block devices to pods.
+    # On Raspberry Pi / Ubuntu 24.04 it is not loaded by default.
+    - name: Load iscsi_tcp kernel module
+      modprobe:
+        name: iscsi_tcp
+        state: present
+      tags: [longhorn_prereqs]
+
+    - name: Persist iscsi_tcp module across reboots
+      copy:
+        dest: /etc/modules-load.d/iscsi_tcp.conf
+        content: "iscsi_tcp\n"
+        mode: "0644"
+      tags: [longhorn_prereqs]
+
+    # If multipath-tools is installed, multipathd will try to claim Longhorn's
+    # virtual block devices, causing volume mount failures. Blacklisting sd*
+    # devices prevents interference. Safe to apply even if multipath is absent.
+    - name: Prevent multipathd from claiming Longhorn block devices
+      copy:
+        dest: /etc/multipath.conf
+        content: |
+          blacklist {
+              devnode "^sd[a-z0-9]+"
+          }
+        mode: "0644"
+      notify: Restart multipathd if running
+      tags: [longhorn_prereqs]
+
+    - name: Create Longhorn data directory on iSCSI volume
+      file:
+        path: "{{ longhorn_data_path }}"
+        state: directory
+        mode: "0755"
+      tags: [longhorn_prereqs]
+
+  handlers:
+    - name: Restart multipathd if running
+      service:
+        name: multipathd
+        state: restarted
+      failed_when: false   # service may not exist — that is fine
+
+
+# ── Play 2: Deploy Longhorn to K8s ────────────────────────────────────────────
+- name: Deploy Longhorn to K8s
+  hosts: control_plane
+  become: yes
+
+  tasks:
+    - name: Add Longhorn Helm repository
+      become: no
+      command: helm repo add longhorn https://charts.longhorn.io
+      tags: [longhorn_deploy]
+
+    - name: Update Helm repositories
+      become: no
+      command: helm repo update
+      tags: [longhorn_deploy]
+
+    # Key settings:
+    #   defaultDataPath          — replicas stored on iSCSI mount, not SD card
+    #   defaultReplicaCount      — 2 replicas: tolerates one node loss without over-using RAM/CPU
+    #   persistence.defaultClass — makes Longhorn the default StorageClass
+    #   service.ui               — expose Longhorn UI as NodePort for direct browser access
+    - name: Install Longhorn via Helm
+      become: no
+      command: >-
+        helm upgrade --install longhorn longhorn/longhorn
+        --namespace longhorn-system --create-namespace
+        --set defaultSettings.defaultDataPath={{ longhorn_data_path }}
+        --set defaultSettings.defaultReplicaCount={{ longhorn_replica_count }}
+        --set persistence.defaultClass=true
+        --set persistence.defaultClassReplicaCount={{ longhorn_replica_count }}
+        --set service.ui.type=NodePort
+        --set service.ui.nodePort={{ longhorn_ui_nodeport }}
+      tags: [longhorn_deploy]
+
+    - name: Wait for Longhorn manager DaemonSet to roll out
+      become: no
+      command: kubectl rollout status daemonset/longhorn-manager -n longhorn-system --timeout=300s
+      changed_when: false
+      tags: [longhorn_deploy]
+
+    - name: Wait for Longhorn UI deployment to roll out
+      become: no
+      command: kubectl rollout status deployment/longhorn-ui -n longhorn-system --timeout=300s
+      changed_when: false
+      tags: [longhorn_deploy]
+
+    - name: Show Longhorn UI access URL
+      debug:
+        msg: "Longhorn UI: http://{{ ansible_host }}:{{ longhorn_ui_nodeport }}"
+      tags: [longhorn_deploy]

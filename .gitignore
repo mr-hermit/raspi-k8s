@@ -1,6 +1,7 @@
 # ── Ansible ───────────────────────────────────────────────────────────────────
 *.retry
 inventory.ini
+LAB-CONTEXT.md
 .vault_pass
 .vault_pass.txt
 *.vault
@@ -31,3 +32,7 @@ Thumbs.db
 # ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.pyc
+
+# AI agents files
+agents/
+.claude/

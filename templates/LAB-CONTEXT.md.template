@@ -1,0 +1,127 @@
+# Lab Context (Raspberry Pi Kubernetes)
+
+This file provides concise target-environment context for AI/code assistants.
+It helps generate Kubernetes/Terraform code aligned to this lab.
+
+Generated from:
+- `inventory.ini`
+- Template: `templates/LAB-CONTEXT.md.template`
+- Generated at: {{GENERATED_AT}}
+
+## Cluster Nodes
+
+### Control Plane
+
+| Node | Role | IP/Host |
+|---|---|---|
+{{CONTROL_PLANE_ROWS}}
+
+### Worker Nodes
+
+| Node | Role | IP/Host |
+|---|---|---|
+{{WORKER_ROWS}}
+
+## Platform Summary
+
+- Node hardware: `{{NODE_MODEL}}`
+- SSH user: `{{ANSIBLE_USER}}`
+- Kubernetes: `{{KUBERNETES_VERSION}}`
+- Runtime: `{{CRI_RUNTIME}}`
+- CNI: `{{CNI_NAME}}`
+- Pod CIDR: `{{POD_CIDR}}`
+
+## Storage Profile
+
+{{STORAGE_PROFILE_SECTION}}
+
+## Network Endpoints
+
+{{NETWORK_ENDPOINTS_SECTION}}
+
+## Constraints For Workload Generation
+
+- Target architecture is ARM64 (`linux/arm64`).
+- Prefer conservative resource defaults suitable for Raspberry Pi.
+- Use PVCs for persistent data; avoid SD-card local paths.
+- `local-storage` is node-affine (pod pinning risk).
+{{CONSTRAINTS_ADDON_NOTES}}
+
+## AI Guidance
+
+- Prefer `ClusterIP + Ingress` for HTTP services by default.
+- Choose storage class by workload behavior:
+{{AI_STORAGE_GUIDANCE}}
+- Keep defaults explicit (probes, resources, ports, PVC size).
+
+## Lab Templates & Scripts
+
+The `templates/` directory provides reusable building blocks for this lab:
+
+### Terraform Module — `templates/terraform/modules/raspi-k8s/`
+
+An umbrella Terraform module that composes all common Kubernetes resources in one call.
+Supported child modules (all optional via feature flags):
+
+| Module | Purpose |
+|---|---|
+| `deployment` | `Deployment` with configurable image, replicas, resources, probes |
+| `service` | `Service` (ClusterIP / NodePort / LoadBalancer) |
+| `ingress` | nginx `Ingress` with optional TLS via cert-manager |
+| `namespace` | `Namespace` creation |
+| `configmap` | Arbitrary `ConfigMap` |
+| `secret` | Opaque `Secret` (base64-encoded data map) |
+| `longhorn-pvc` | `PersistentVolumeClaim` on `longhorn` |
+| `synology-pvc` | `PersistentVolumeClaim` on `synology-iscsi` |
+| `local-pvc` | `PersistentVolumeClaim` on `local-storage` |
+| `rbac` | `ServiceAccount` + `ClusterRoleBinding` |
+| `monitoring` | Grafana `ConfigMap` dashboard injection |
+| `registry` | `Secret` for private registry pull credentials |
+| `tls-cert` | `Certificate` resource for cert-manager |
+
+Usage pattern:
+```hcl
+module "myapp" {
+  source         = "../../modules/raspi-k8s"
+  name           = "myapp"
+  namespace      = "default"
+  image          = "{{REGISTRY_ADDRESS}}/myapp:latest"
+  enable_ingress = true
+  ingress_host   = "myapp.local"
+}
+```
+
+Ready-made examples in `templates/terraform/examples/`:
+- `simple-web-app/` — ClusterIP service + nginx Ingress, 2 replicas
+- `postgres-synology/` — StatefulDB with `synology-iscsi` PVC and Kubernetes Secret
+
+### Build & Push Script — `templates/scripts/build-push.sh`
+
+Builds a multi-platform Docker image (`linux/arm64`) and pushes it to the lab registry.
+
+```bash
+# Basic: image name defaults to directory name
+./templates/scripts/build-push.sh ./apps/api
+
+# Custom name and tag
+./templates/scripts/build-push.sh ./apps/api myapi:v2.1.0
+
+# Override registry (also read automatically from inventory.ini)
+REGISTRY={{REGISTRY_ADDRESS}} ./templates/scripts/build-push.sh ./apps/api
+```
+
+The script reads `inventory.ini` automatically to resolve the registry address.
+
+## Local Tooling Hint
+
+- Typical kubeconfig path: `{{KUBECONFIG_PATH}}`
+  ```bash
+  export KUBECONFIG={{KUBECONFIG_PATH}}
+  kubectl get nodes
+  ```
+- Push an image to the private registry:
+  ```bash
+  docker build --platform linux/arm64 -t {{REGISTRY_ADDRESS}}/myapp:latest .
+  docker push {{REGISTRY_ADDRESS}}/myapp:latest
+  ```
+- Reference in manifests/Terraform as `image: {{REGISTRY_ADDRESS}}/myapp:latest`.

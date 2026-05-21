@@ -1,0 +1,16 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: synology-iscsi
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "{{ synology_csi_default_class | lower }}"
+provisioner: csi.san.synology.com
+parameters:
+  fsType: ext4
+  # Must match the host value in the client-info secret
+  dsm: "{{ nas_host }}"
+  # Storage pool path on the NAS — where LUNs will be created
+  location: "{{ nas_volume_path }}"
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: Immediate

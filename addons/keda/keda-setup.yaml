@@ -1,0 +1,41 @@
+---
+# addons/keda/keda-setup.yaml
+#
+# PURPOSE: Deploy KEDA (Kubernetes Event-driven Autoscaling) on the K8s cluster.
+#          KEDA adds custom HorizontalPodAutoscaler scalers driven by external
+#          event sources (queues, topics, metrics, cron) without replacing the
+#          standard HPA — both coexist.
+#
+# RUN AFTER k8s/k8s-setup.yaml
+#
+# USAGE:
+#   ansible-playbook -i inventory.ini addons/keda/keda-setup.yaml
+#
+# TAGS (selective execution):
+#   keda_deploy — apply official manifest and wait for operator readiness
+
+- name: Deploy KEDA to Kubernetes cluster
+  hosts: control_plane
+  become: yes
+  vars:
+    keda_namespace: keda
+    keda_version: "2.14.0"
+    keda_manifest_url: "https://github.com/kedacore/keda/releases/download/v{{ keda_version }}/keda-{{ keda_version }}.yaml"
+
+  tasks:
+    - name: Apply KEDA official manifest
+      become: no
+      command: kubectl apply -f {{ keda_manifest_url }}
+      tags: [keda_deploy]
+
+    - name: Wait for KEDA operator to become ready
+      become: no
+      command: kubectl rollout status deployment/keda-operator -n {{ keda_namespace }} --timeout=300s
+      changed_when: false
+      tags: [keda_deploy]
+
+    - name: Wait for KEDA metrics API server to become ready
+      become: no
+      command: kubectl rollout status deployment/keda-operator-metrics-apiserver -n {{ keda_namespace }} --timeout=300s
+      changed_when: false
+      tags: [keda_deploy]

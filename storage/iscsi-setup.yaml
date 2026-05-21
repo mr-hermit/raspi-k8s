@@ -109,6 +109,35 @@
         line: 'node.conn[0].timeo.login_timeout = 120'
       tags: [iscsi_client]
 
+    # If the iSCSI session drops mid-operation (e.g. NAS hibernates), the initiator
+    # queues all pending I/O and tries to re-establish the session rather than
+    # immediately returning I/O errors to the filesystem. 300s gives the NAS enough
+    # time to wake from hibernation and reconnect transparently. Without this, a brief
+    # NAS hiccup causes write errors that corrupt the ext4 journal on the iSCSI device.
+    - name: Set iSCSI session replacement timeout to survive NAS hibernation
+      lineinfile:
+        path: /etc/iscsi/iscsid.conf
+        regexp: '^node\.session\.timeo\.replacement_timeout'
+        line: 'node.session.timeo.replacement_timeout = 300'
+      tags: [iscsi_client]
+
+    # NOP-Out heartbeats detect a dropped TCP connection within noop_out_timeout seconds
+    # so session recovery starts immediately rather than waiting for an I/O operation to
+    # time out. With interval=5 and timeout=5, a dead connection is detected in ~10s.
+    - name: Configure iSCSI NOP-Out heartbeat interval
+      lineinfile:
+        path: /etc/iscsi/iscsid.conf
+        regexp: '^node\.conn\[0\]\.timeo\.noop_out_interval'
+        line: 'node.conn[0].timeo.noop_out_interval = 5'
+      tags: [iscsi_client]
+
+    - name: Configure iSCSI NOP-Out heartbeat timeout
+      lineinfile:
+        path: /etc/iscsi/iscsid.conf
+        regexp: '^node\.conn\[0\]\.timeo\.noop_out_timeout'
+        line: 'node.conn[0].timeo.noop_out_timeout = 5'
+      tags: [iscsi_client]
+
     # Systemd unit that blocks open-iscsi until the NAS is reachable on its iSCSI port.
     # Covers both disk hibernation (NAS network is up, disks spinning up) and full
     # hibernation (WoL or manual wake needed — this just waits until it responds).
@@ -295,12 +324,14 @@
         src: "UUID={{ iscsi_uuid.stdout | trim }}"
         fstype: ext4
         # _netdev                     — mount after network is up
-        # x-systemd.requires          — wait for open-iscsi login before mounting
+        # x-systemd.requires          — hard dependency on open-iscsi and NAS wait units
+        # x-systemd.after             — explicit ordering; avoids race where mount starts
+        #                               in parallel before iSCSI login is complete
         # x-systemd.mount-timeout-sec — give NAS time to wake up, but don't block forever
         # nofail                      — if mount times out, boot continues and SSH stays
         #                               accessible; kubelet/CRI-O won't start without the
         #                               mount anyway (Requires= in their drop-in overrides)
-        opts: "defaults,_netdev,nofail,x-systemd.requires=open-iscsi.service,x-systemd.mount-timeout-sec=180"
+        opts: "defaults,_netdev,nofail,x-systemd.requires=open-iscsi.service:nas-wait.service,x-systemd.after=open-iscsi.service:nas-wait.service,x-systemd.mount-timeout-sec=180"
         state: mounted
       tags: [iscsi_mount]
 
