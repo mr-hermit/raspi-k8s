@@ -174,13 +174,53 @@
         mode: "0755"
       tags: [iscsi_client]
 
-    - name: Make open-iscsi require nas-wait before starting
+    # The Synology CSI driver resets all node.startup values to 'manual' when it
+    # manages its own PVC targets. This service re-enforces 'automatic' for this
+    # node's own diskstation target (matched by hostname) before open-iscsi logs in.
+    - name: Install iSCSI startup enforcer service
+      copy:
+        dest: /etc/systemd/system/iscsi-enforce-startup.service
+        content: |
+          [Unit]
+          Description=Enforce automatic iSCSI startup for this node's own target
+          After=iscsid.service nas-wait.service
+          Requires=iscsid.service
+          Before=open-iscsi.service
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/bin/bash -c '\
+            hostname=$(hostname); \
+            iscsiadm -m node 2>/dev/null | grep "^\[" | while read portal target; do \
+              iscsiadm -m node -T "$target" -p "$portal" -o delete 2>/dev/null; \
+            done; \
+            iscsiadm -m node 2>/dev/null | grep "$hostname" | grep -v "^\[" | while read portal target; do \
+              iscsiadm -m node -T "$target" -p "$portal" -o update -n node.startup -v automatic; \
+              echo "iscsi-enforce-startup: set $target automatic"; \
+            done'
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: "0644"
+      notify: [Reload systemd, Enable iscsi-enforce-startup]
+      tags: [iscsi_client]
+
+    - name: Make open-iscsi require nas-wait and enforce-startup before starting
       copy:
         dest: /etc/systemd/system/open-iscsi.service.d/nas-wait.conf
         content: |
           [Unit]
-          After=nas-wait.service
-          Requires=nas-wait.service
+          After=nas-wait.service iscsi-enforce-startup.service
+          Requires=nas-wait.service iscsi-enforce-startup.service
+
+          [Service]
+          # activate-storage.sh hangs on udevadm settle due to a circular wait:
+          # it triggers the mount unit, which Requires= open-iscsi to be *active*,
+          # but open-iscsi is still *activating* — deadlock. Skip it; systemd
+          # handles our fstab mount automatically via the device unit appearing.
+          ExecStart=
+          ExecStart=/usr/sbin/iscsiadm -m node --loginall=automatic
         mode: "0644"
       notify: [Reload systemd]
       tags: [iscsi_client]
@@ -203,6 +243,18 @@
     - name: Discover iSCSI targets on NAS
       command: iscsiadm -m discovery -t sendtargets -p {{ nas_host }}:{{ nas_iscsi_port }}
       register: iscsi_discovery
+      changed_when: false
+      tags: [iscsi_connect]
+
+    # Synology discovery returns both IPv4 and IPv6 (link-local fe80::) portals.
+    # IPv6 logins hang indefinitely (TimeoutStartSec=infinity in open-iscsi).
+    # Delete all IPv6 node entries immediately after every discovery run.
+    - name: Delete IPv6 iSCSI node entries returned by discovery
+      shell: |
+        iscsiadm -m node 2>/dev/null | awk '/^\[/{print $1, $2}' | \
+        while read portal target; do
+          iscsiadm -m node -T "$target" -p "$portal" -o delete 2>/dev/null || true
+        done
       changed_when: false
       tags: [iscsi_connect]
 
@@ -375,6 +427,12 @@
     - name: Enable nas-wait
       service:
         name: nas-wait
+        enabled: yes
+        state: started
+
+    - name: Enable iscsi-enforce-startup
+      service:
+        name: iscsi-enforce-startup
         enabled: yes
         state: started
 
