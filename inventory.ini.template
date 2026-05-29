@@ -35,6 +35,16 @@ registry_nodeport=30500                     # NodePort exposed on every cluster 
 registry_storage_path=/mnt/storage/registry
 registry_storage_size=50Gi
 
+# ── GitHub Actions Runner Controller ─────────────────────────────────────────
+# arc_github_config_url: org-level (https://github.com/<org>) or
+#                        repo-level (https://github.com/<org>/<repo>)
+# arc_github_token: PAT — admin:org scope for org runners, repo scope for repo runners
+arc_github_config_url=https://github.com/<org-or-org/repo>
+arc_github_token=<github-pat>              # encrypt with ansible-vault
+arc_runner_scale_set_name=arc-runner-set
+arc_runner_min_runners=0
+arc_runner_max_runners=5
+
 # ── Hosts ─────────────────────────────────────────────────────────────────────
 # Use static IP addresses for ansible_host to avoid DNS dependency during setup.
 # The hostname of each Pi (set during imaging) must match ansible_host if

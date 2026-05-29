@@ -1,0 +1,98 @@
+---
+# addons/github-arc/arc-setup.yaml
+#
+# PURPOSE: Deploy GitHub Actions Runner Controller (ARC) on the K8s cluster.
+#          ARC manages self-hosted GitHub Actions runners as ephemeral pods,
+#          scaling them up and down automatically via KEDA-backed runner scale sets.
+#          Runners register with GitHub on demand and terminate after each job.
+#
+# RUN AFTER k8s/k8s-setup.yaml
+#
+# USAGE:
+#   ansible-playbook -i inventory.ini addons/arc/arc-setup.yaml
+#
+#   Required vars (set in inventory.ini or pass with -e):
+#     arc_github_config_url — GitHub org or repo to register runners against
+#                             org:  https://github.com/<org>
+#                             repo: https://github.com/<org>/<repo>
+#     arc_github_token      — PAT with appropriate scope:
+#                             org runners:  admin:org
+#                             repo runners: repo
+#
+# TAGS (selective execution):
+#   arc_controller — install ARC controller into arc-systems namespace
+#   arc_runners    — create auth secret + install runner scale set
+
+- name: Deploy GitHub Actions Runner Controller
+  hosts: control_plane
+  become: yes
+  vars:
+    arc_controller_namespace: arc-systems
+    arc_runners_namespace: arc-runners
+    arc_version: "0.9.3"
+    arc_runner_scale_set_name: arc-runner-set
+    arc_runner_min_runners: 0
+    arc_runner_max_runners: 5
+    # arc_github_config_url and arc_github_token must be set in inventory.ini
+
+  tasks:
+    # ── ARC Controller ────────────────────────────────────────────────────────
+    - name: Install ARC controller via Helm
+      become: no
+      command: >-
+        helm upgrade --install arc
+        oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller
+        --namespace {{ arc_controller_namespace }} --create-namespace
+        --version {{ arc_version }}
+      tags: [arc_controller]
+
+    - name: Wait for ARC controller to become ready
+      become: no
+      command: >-
+        kubectl rollout status deployment/arc-gha-rs-controller
+        -n {{ arc_controller_namespace }} --timeout=180s
+      changed_when: false
+      tags: [arc_controller]
+
+    # ── Runner Scale Set ──────────────────────────────────────────────────────
+    - name: Create arc-runners namespace
+      become: no
+      command: kubectl create namespace {{ arc_runners_namespace }}
+      register: ns_result
+      failed_when: ns_result.rc != 0 and 'AlreadyExists' not in ns_result.stderr
+      changed_when: ns_result.rc == 0
+      tags: [arc_runners]
+
+    - name: Create GitHub auth secret
+      become: no
+      shell: |
+        kubectl create secret generic arc-github-secret \
+          --namespace {{ arc_runners_namespace }} \
+          --from-literal=github_token={{ arc_github_token }} \
+          --dry-run=client -o yaml | kubectl apply -f -
+      tags: [arc_runners]
+
+    - name: Install runner scale set via Helm
+      become: no
+      command: >-
+        helm upgrade --install {{ arc_runner_scale_set_name }}
+        oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
+        --namespace {{ arc_runners_namespace }}
+        --version {{ arc_version }}
+        --set githubConfigUrl={{ arc_github_config_url }}
+        --set githubConfigSecret=arc-github-secret
+        --set minRunners={{ arc_runner_min_runners }}
+        --set maxRunners={{ arc_runner_max_runners }}
+      tags: [arc_runners]
+
+    - name: Show runner scale set status
+      become: no
+      command: kubectl get autoscalingrunnerset -n {{ arc_runners_namespace }}
+      changed_when: false
+      register: arc_status
+      tags: [arc_runners]
+
+    - name: Display runner scale set status
+      debug:
+        msg: "{{ arc_status.stdout_lines }}"
+      tags: [arc_runners]
