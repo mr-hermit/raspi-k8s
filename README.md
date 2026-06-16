@@ -18,7 +18,7 @@ select *Other general-purpose OS → Ubuntu → Ubuntu Server 26.04 LTS (64-bit)
 |------|------|--------|
 | Control plane | `rasserv01` | Raspberry Pi 5 |
 | Worker | `rasserv02` | Raspberry Pi 5 |
-| Worker | `rasserv03` | Raspberry Pi 5 |
+| Worker | `rasserv03` | Raspberry Pi 5 + Hailo AI HAT+ (26 TOPS) |
 | NAS | `diskstation` | Synology (any model with SAN Manager) |
 
 ## Project layout
@@ -45,6 +45,10 @@ raspi/
 ├── storage/             Phase 1 — iSCSI block storage from Synology NAS (optional)
 │   ├── README.md        → Synology manual prep guide + playbook usage
 │   └── iscsi-setup.yaml → Attach LUN, format, mount at /mnt/storage
+│
+├── hailo/               Phase 1 — Hailo AI HAT+ driver/runtime (optional, [hailo_nodes] only)
+│   ├── README.md        → Raspberry Pi apt repo + pinning explanation, troubleshooting
+│   └── hailo-setup.yaml → DKMS driver, firmware, HailoRT runtime, verification
 │
 ├── k8s/                 Phase 2 — Kubernetes 1.32 cluster (CRI-O + Calico)
 │   ├── README.md
@@ -139,6 +143,9 @@ ansible-playbook -i inventory.ini server/server-setup.yaml
 # 2. (Optional) Attach iSCSI storage from Synology NAS
 #    Manual NAS prep first — see storage/README.md
 ansible-playbook -i inventory.ini storage/iscsi-setup.yaml
+
+# 2b. (Optional) Configure a Hailo AI HAT+ — only runs on [hailo_nodes]
+ansible-playbook -i inventory.ini hailo/hailo-setup.yaml
 
 # 3. Kubernetes cluster
 ansible-playbook -i inventory.ini k8s/k8s-setup.yaml

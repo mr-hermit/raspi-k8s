@@ -1,0 +1,174 @@
+---
+# hailo/hailo-setup.yaml
+#
+# PURPOSE: Configure Ubuntu Server to drive a Hailo AI HAT+ (Hailo-8, 26 TOPS)
+#          installed over the Raspberry Pi 5's PCIe FPC connector.
+#
+#          Raspberry Pi only publishes the hailo* packages (kernel driver via
+#          DKMS, firmware, HailoRT runtime) through their own apt repository,
+#          built for Raspberry Pi OS (Debian bookworm). This playbook adds that
+#          repository but pins it so ONLY hailo* packages are ever installed
+#          from it — nothing else on the node is allowed to come from bookworm.
+#
+#          Independent of Kubernetes and storage; only targets [hailo_nodes].
+#
+# RUN AFTER server/server-setup.yaml.
+#
+# USAGE:
+#   ansible-playbook -i inventory.ini hailo/hailo-setup.yaml
+#
+# TAGS (run individual stages):
+#   hailo_repo     — add Raspberry Pi apt repo + pin file
+#   hailo_packages — install kernel driver (DKMS), firmware, HailoRT runtime
+#   hailo_reboot   — reboot to load the driver against the new device
+#   hailo_verify   — run hailortcli fw-control identify and assert /dev/hailo0
+
+- name: Configure Hailo AI HAT+ on Ubuntu Server
+  hosts: hailo_nodes
+  become: yes
+  vars:
+    # archive.raspberrypi.com only ships a Debian bookworm suite — pin file
+    # below keeps it from leaking into the rest of the Ubuntu system.
+    hailo_apt_suite: bookworm
+    # hailo-tappas-core (GStreamer pipelines) and python3-hailort (needs
+    # Python 3.11 specifically — conflicts with Ubuntu 24.04+'s default 3.12)
+    # are off by default to keep the install minimal. hailortcli + libhailort
+    # are enough to run .hef models directly.
+    hailo_install_tappas: false
+    hailo_install_python_bindings: false
+
+  tasks:
+    # ── Repository ──────────────────────────────────────────────────────────
+    - name: Download Raspberry Pi apt signing key
+      get_url:
+        url: https://archive.raspberrypi.com/debian/raspberrypi.gpg.key
+        dest: /tmp/raspberrypi.gpg.key
+        mode: "0644"
+      tags: [hailo_repo]
+
+    - name: Dearmor and install Raspberry Pi apt signing key
+      command: gpg --dearmor -o /usr/share/keyrings/raspberrypi-archive-keyring.gpg /tmp/raspberrypi.gpg.key
+      args:
+        creates: /usr/share/keyrings/raspberrypi-archive-keyring.gpg
+      tags: [hailo_repo]
+
+    - name: Add Raspberry Pi apt repository
+      copy:
+        dest: /etc/apt/sources.list.d/raspberrypi.list
+        content: |
+          deb [signed-by=/usr/share/keyrings/raspberrypi-archive-keyring.gpg] http://archive.raspberrypi.com/debian/ {{ hailo_apt_suite }} main
+        mode: "0644"
+      register: hailo_repo_added
+      tags: [hailo_repo]
+
+    # Negative priority blocks every other package on the origin; the hailo*
+    # stanza below then re-allows just the packages this playbook needs.
+    - name: Pin Raspberry Pi repo to hailo packages only
+      copy:
+        dest: /etc/apt/preferences.d/raspberrypi-hailo
+        content: |
+          Package: *
+          Pin: origin archive.raspberrypi.com
+          Pin-Priority: -10
+
+          Package: hailofw hailort hailo-dkms hailo-tappas-core* python3-hailort rpicam-apps-hailo-postprocess
+          Pin: origin archive.raspberrypi.com
+          Pin-Priority: 900
+        mode: "0644"
+      tags: [hailo_repo]
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+      when: hailo_repo_added.changed
+      tags: [hailo_repo]
+
+    # ── Packages ────────────────────────────────────────────────────────────
+    - name: Install DKMS and matching kernel headers
+      apt:
+        name:
+          - dkms
+          - "linux-headers-{{ ansible_kernel }}"
+        state: present
+      tags: [hailo_packages]
+
+    - name: Install Hailo firmware, kernel driver, and HailoRT runtime
+      apt:
+        name:
+          - hailofw
+          - hailort
+          - hailo-dkms
+        state: present
+      register: hailo_pkg_install
+      tags: [hailo_packages]
+
+    - name: Install HailoRT TAPPAS (GStreamer pipelines)
+      apt:
+        name: hailo-tappas-core
+        state: present
+      when: hailo_install_tappas
+      register: hailo_tappas_install
+      tags: [hailo_packages]
+
+    # python3-hailort pins python3 (>= 3.11, << 3.12); only enable this on
+    # nodes where that constraint is satisfied (e.g. via deadsnakes PPA).
+    - name: Install Python bindings for HailoRT
+      apt:
+        name: python3-hailort
+        state: present
+      when: hailo_install_python_bindings
+      register: hailo_python_install
+      tags: [hailo_packages]
+
+    # ── Reboot ──────────────────────────────────────────────────────────────
+    - name: Reboot to load the Hailo PCIe driver
+      reboot:
+        reboot_timeout: 300
+        connect_timeout: 300
+        msg: "Reboot initiated by Ansible to load the Hailo PCIe driver"
+        pre_reboot_delay: 30
+        post_reboot_delay: 60
+        test_command: uptime
+      when: >
+        hailo_pkg_install.changed or
+        (hailo_install_tappas and hailo_tappas_install.changed) or
+        (hailo_install_python_bindings and hailo_python_install.changed)
+      tags: [hailo_reboot]
+
+    - name: Wait for node to come back online
+      wait_for_connection:
+        delay: 10
+        sleep: 5
+        timeout: 300
+      when: >
+        hailo_pkg_install.changed or
+        (hailo_install_tappas and hailo_tappas_install.changed) or
+        (hailo_install_python_bindings and hailo_python_install.changed)
+      tags: [hailo_reboot]
+
+    # ── Verify ──────────────────────────────────────────────────────────────
+    - name: Check /dev/hailo0 is present
+      stat:
+        path: /dev/hailo0
+      register: hailo_device
+      tags: [hailo_verify]
+
+    - name: Fail if the Hailo device node is missing
+      fail:
+        msg: >-
+          /dev/hailo0 not found. Check the HAT is seated and powered, run
+          `dmesg | grep hailo` for driver errors, and see hailo/README.md
+          troubleshooting section.
+      when: not hailo_device.stat.exists
+      tags: [hailo_verify]
+
+    - name: Query Hailo device identity
+      command: hailortcli fw-control identify
+      register: hailo_identify
+      changed_when: false
+      tags: [hailo_verify]
+
+    - name: Show Hailo device identity
+      debug:
+        msg: "{{ hailo_identify.stdout_lines }}"
+      tags: [hailo_verify]

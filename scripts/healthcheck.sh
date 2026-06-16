@@ -15,6 +15,15 @@ set -uo pipefail
 export KUBECONFIG="${KUBECONFIG:-${HOME}/.kube/config-raspi}"
 INVENTORY="${1:-inventory.ini}"
 
+# Running `bash ./scripts/healthcheck.sh` from PowerShell on Windows invokes
+# WSL's bash.exe, which has no native Linux kubectl on PATH — only the
+# Windows kubectl.exe is reachable via interop, and `which`/exec lookups
+# don't resolve a bare "kubectl" to a ".exe" file. Fall back to it so the
+# script works the same from PowerShell, WSL, and native Linux.
+if ! command -v kubectl >/dev/null 2>&1 && command -v kubectl.exe >/dev/null 2>&1; then
+  kubectl() { kubectl.exe "$@"; }
+fi
+
 # ── Output ─────────────────────────────────────────────────────────────────────
 
 [[ -t 1 ]] && {
@@ -56,6 +65,7 @@ declare -A HOST_ADDR
 declare -A REACHABLE
 CONTROL_NODES=()
 WORKER_NODES=()
+HAILO_NODES=()
 
 parse_inventory() {
   [[ -f "$INVENTORY" ]] || { printf "ERROR: inventory not found: %s\n" "$INVENTORY"; exit 1; }
@@ -77,6 +87,10 @@ parse_inventory() {
       HOST_ADDR["$name"]="$host"
       [[ "$group" == "control_plane" ]] && CONTROL_NODES+=("$name")
       [[ "$group" == "worker_node"   ]] && WORKER_NODES+=("$name")
+    elif [[ "$group" == "hailo_nodes" && "$line" =~ ^([A-Za-z0-9_]+) ]]; then
+      # [hailo_nodes] lists bare host aliases (no ansible_host=) — they
+      # already got their address from [control_plane]/[worker_node] above.
+      HAILO_NODES+=("${BASH_REMATCH[1]}")
     fi
   done < "$INVENTORY"
 }
@@ -162,6 +176,43 @@ check_iscsi() {
       check "$name  /mnt/storage" "OK" "$usage"
     else
       check "$name  /mnt/storage" "CRITICAL" "not mounted"
+    fi
+  done
+}
+
+check_hailo() {
+  [[ "${#HAILO_NODES[@]}" -eq 0 ]] && return
+  section "Hailo AI HAT+  (${HAILO_NODES[*]})"
+  local name addr
+  for name in "${HAILO_NODES[@]}"; do
+    addr="${HOST_ADDR[$name]:-}"
+    if [[ -z "$addr" || -z "${REACHABLE[$name]+x}" ]]; then
+      check "$name  hailo" "CRITICAL" "node unreachable — skipping"
+      continue
+    fi
+
+    if ! ssh_run "$addr" "test -e /dev/hailo0"; then
+      check "$name  /dev/hailo0" "CRITICAL" "device node missing — see hailo/README.md troubleshooting"
+      continue
+    fi
+    check "$name  /dev/hailo0" "OK"
+
+    if ! ssh_run "$addr" "command -v hailortcli" &>/dev/null; then
+      check "$name  hailortcli" "NOT_CONFIGURED" "HailoRT runtime not installed"
+      continue
+    fi
+
+    local identify
+    # Board Name comes back null-padded — strip null bytes to avoid a bash
+    # "ignored null byte in input" warning from command substitution.
+    identify=$(ssh_run "$addr" "hailortcli fw-control identify 2>/dev/null" | tr -d '\0')
+    if [[ -n "$identify" ]]; then
+      local chip fw
+      chip=$(echo "$identify" | grep -i "Device Architecture" | cut -d: -f2- | sed 's/^ *//')
+      fw=$(echo "$identify" | grep -i "Firmware Version" | cut -d: -f2- | awk '{print $1}')
+      check "$name  hailortcli identify" "OK" "${chip:-HAILO8} fw ${fw:-?}"
+    else
+      check "$name  hailortcli identify" "CRITICAL" "device not responding"
     fi
   done
 }
@@ -428,6 +479,7 @@ main() {
   check_connectivity
   check_ssh_auth
   check_iscsi
+  check_hailo
   check_k8s_services
   check_k8s_cluster
   check_storage

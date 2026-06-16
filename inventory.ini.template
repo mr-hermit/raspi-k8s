@@ -60,3 +60,9 @@ worker_node_2 ansible_host=192.168.1.103
 [raspservers:children]
 control_plane
 worker_node
+
+# ── Hailo AI HAT+ ─────────────────────────────────────────────────────────────
+# Nodes with a physical AI HAT+ installed — see hailo/README.md
+# Omit this group entirely if no node has the HAT installed.
+[hailo_nodes]
+worker_node_2   # rasserv03
