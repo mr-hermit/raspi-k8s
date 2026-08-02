@@ -20,6 +20,8 @@
 # TAGS (run individual stages):
 #   hailo_repo     — add Raspberry Pi apt repo + pin file
 #   hailo_packages — install kernel driver (DKMS), firmware, HailoRT runtime
+#   hailo_udev     — drop the udev rule that creates /dev/hailo0
+#   hailo_boot     — register hailo_pci in modules-load.d for boot-time load
 #   hailo_reboot   — reboot to load the driver against the new device
 #   hailo_verify   — run hailortcli fw-control identify and assert /dev/hailo0
 
@@ -77,10 +79,23 @@
         mode: "0644"
       tags: [hailo_repo]
 
+    # Ubuntu's official Raspberry Pi image ships a preconfigured, unsigned
+    # /etc/apt/sources.list.d/raspi.list for the same origin, with a "ui"
+    # component that no longer exists upstream. It's harmless on its own, but
+    # once this playbook adds raspberrypi.list for the same origin, apt warns
+    # about duplicate Packages/Translations targets and fails to fetch "ui"
+    # on every run. Remove it so ours is the only source for this origin.
+    - name: Remove stray unmanaged raspi.list apt source
+      file:
+        path: /etc/apt/sources.list.d/raspi.list
+        state: absent
+      register: hailo_stray_repo_removed
+      tags: [hailo_repo]
+
     - name: Update apt cache
       apt:
         update_cache: yes
-      when: hailo_repo_added.changed
+      when: hailo_repo_added.changed or hailo_stray_repo_removed.changed
       tags: [hailo_repo]
 
     # ── Packages ────────────────────────────────────────────────────────────
@@ -102,6 +117,18 @@
       register: hailo_pkg_install
       tags: [hailo_packages]
 
+    # A kernel point-release from a later `apt upgrade` can leave hailo-dkms
+    # built only against the old kernel's headers — dkms status then shows
+    # "added" but never "installed" for the running kernel. Re-running this
+    # on every play (not just first install) catches that drift.
+    - name: Ensure hailo-dkms is built and installed for the running kernel
+      command: dkms autoinstall
+      register: hailo_dkms_autoinstall
+      changed_when: >-
+        'Building module' in hailo_dkms_autoinstall.stdout or
+        'Installing module' in hailo_dkms_autoinstall.stdout
+      tags: [hailo_packages]
+
     - name: Install HailoRT TAPPAS (GStreamer pipelines)
       apt:
         name: hailo-tappas-core
@@ -120,6 +147,47 @@
       register: hailo_python_install
       tags: [hailo_packages]
 
+    # ── udev rule ───────────────────────────────────────────────────────────
+    # The driver registers the device class in sysfs fine on its own, but on
+    # Ubuntu (unlike Raspberry Pi OS) nothing drops a udev rule to turn that
+    # into /dev/hailo0 — without this, the sysfs class exists but the device
+    # node never appears.
+    - name: Detect Hailo device class name in sysfs
+      shell: ls /sys/class | grep -i hailo | head -1
+      register: hailo_sysfs_class
+      changed_when: false
+      failed_when: false
+      tags: [hailo_udev]
+
+    - name: Add udev rule to create /dev/hailo0
+      copy:
+        dest: /etc/udev/rules.d/51-hailo-videodev.rules
+        content: |
+          SUBSYSTEM=="{{ hailo_sysfs_class.stdout | default('hailo_chardev', true) }}", MODE="0666"
+        mode: "0644"
+      register: hailo_udev_rule
+      tags: [hailo_udev]
+
+    - name: Reload and trigger udev rules
+      command: "{{ item }}"
+      loop:
+        - udevadm control --reload-rules
+        - udevadm trigger
+      when: hailo_udev_rule.changed
+      tags: [hailo_udev]
+
+    # ── Boot-time module load ──────────────────────────────────────────────
+    # hailo-dkms registers the module with DKMS but doesn't add it to
+    # modules-load.d, so it only loads via the reboot below — a later reboot
+    # (e.g. after a power cycle) would come up without it.
+    - name: Ensure hailo_pci loads automatically on boot
+      copy:
+        dest: /etc/modules-load.d/hailo.conf
+        content: |
+          hailo_pci
+        mode: "0644"
+      tags: [hailo_boot]
+
     # ── Reboot ──────────────────────────────────────────────────────────────
     - name: Reboot to load the Hailo PCIe driver
       reboot:
@@ -131,6 +199,7 @@
         test_command: uptime
       when: >
         hailo_pkg_install.changed or
+        hailo_dkms_autoinstall.changed or
         (hailo_install_tappas and hailo_tappas_install.changed) or
         (hailo_install_python_bindings and hailo_python_install.changed)
       tags: [hailo_reboot]
@@ -142,6 +211,7 @@
         timeout: 300
       when: >
         hailo_pkg_install.changed or
+        hailo_dkms_autoinstall.changed or
         (hailo_install_tappas and hailo_tappas_install.changed) or
         (hailo_install_python_bindings and hailo_python_install.changed)
       tags: [hailo_reboot]
