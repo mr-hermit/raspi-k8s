@@ -1,0 +1,72 @@
+# addons/logging/files/loki-values.yaml.j2
+#
+# Loki single-binary mode — one pod, filesystem storage on a synology-iscsi PVC.
+# No object storage, no separate read/write/backend components — this is a lab,
+# not a multi-tenant production deployment.
+
+deploymentMode: SingleBinary
+
+loki:
+  auth_enabled: false
+  commonConfig:
+    replication_factor: 1
+  schemaConfig:
+    configs:
+      - from: "2024-01-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: index_
+          period: 24h
+  storage:
+    type: filesystem
+  limits_config:
+    retention_period: {{ loki_retention_hours }}h
+    ingestion_rate_mb: 8
+    ingestion_burst_size_mb: 16
+  compactor:
+    retention_enabled: true
+    delete_request_store: filesystem
+
+singleBinary:
+  replicas: 1
+  persistence:
+    enabled: true
+    storageClass: synology-iscsi
+    size: {{ loki_pvc_size }}
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+# Not used in SingleBinary mode — keep at zero so the chart doesn't schedule them
+backend:
+  replicas: 0
+read:
+  replicas: 0
+write:
+  replicas: 0
+
+# Memcached-backed caches — unnecessary overhead for a single-node lab binary
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+
+gateway:
+  enabled: true
+  replicas: 1
+
+monitoring:
+  serviceMonitor:
+    enabled: false
+  selfMonitoring:
+    enabled: false
+  lokiCanary:
+    enabled: false
+
+test:
+  enabled: false

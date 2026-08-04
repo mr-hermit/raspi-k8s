@@ -35,4 +35,6 @@ Default credentials: `admin` / `prom-operator`
 | `metrics_server` | Metrics Server — powers `kubectl top` and HPA |
 | `prometheus`     | kube-prometheus-stack — cluster metrics collection |
 | `grafana`        | Grafana NodePort service — dashboard UI |
-| `loki`           | Loki + Promtail — log aggregation across all nodes |
+
+Log aggregation (Loki + Promtail) is a separate addon — see
+[addons/logging/README.md](../logging/README.md).

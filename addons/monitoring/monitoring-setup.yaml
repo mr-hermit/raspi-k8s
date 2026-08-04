@@ -14,7 +14,9 @@
 #   prometheus     — add Helm repo, install kube-prometheus-stack
 #   grafana        — apply Grafana NodePort service
 #   grafana_ingress — apply Grafana Ingress (requires ingress-setup.yaml)
-#   loki           — install Loki + Promtail (log aggregation)
+#
+# Log aggregation (Loki + Promtail) lives in its own addon:
+#   addons/logging/logging-setup.yaml — run after this playbook
 
 - name: Deploy monitoring stack to K8s
   hosts: control_plane
@@ -98,36 +100,3 @@
       debug:
         msg: "Grafana via Ingress: https://grafana.local:30443  (add grafana.local -> {{ ansible_host }} to /etc/hosts)"
       tags: [grafana_ingress]
-
-    # ── Loki + Promtail ───────────────────────────────────────────────────────
-    # Loki stores logs; Promtail runs on every node and ships logs to Loki.
-    # In Grafana, add a Loki datasource pointing to http://loki-stack:3100
-    - name: Add Grafana Helm repository (for Loki)
-      become: no
-      command: helm repo add grafana https://grafana.github.io/helm-charts
-      tags: [loki]
-
-    - name: Update Helm repositories
-      become: no
-      command: helm repo update
-      tags: [loki]
-
-    - name: Install Loki stack (Loki + Promtail)
-      become: no
-      command: >-
-        helm upgrade --install loki-stack grafana/loki-stack
-        --namespace monitoring --create-namespace
-        --set grafana.enabled=false
-        --set prometheus.enabled=false
-      tags: [loki]
-
-    - name: Wait for Loki to become ready
-      become: no
-      command: kubectl rollout status statefulset/loki-stack -n monitoring --timeout=120s
-      changed_when: false
-      tags: [loki]
-
-    - name: Show Loki datasource URL for Grafana
-      debug:
-        msg: "Add Loki datasource in Grafana: http://loki-stack:3100"
-      tags: [loki]

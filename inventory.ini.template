@@ -35,6 +35,10 @@ registry_nodeport=30500                     # NodePort exposed on every cluster 
 registry_storage_path=/mnt/storage/registry
 registry_storage_size=50Gi
 
+# ── Logging (Loki + Promtail) ────────────────────────────────────────────────
+loki_pvc_size=200Gi                         # Loki filesystem storage — generous, ~2TB free on NAS
+loki_retention_days=30                      # How long Loki keeps logs before deleting
+
 # ── GitHub Actions Runner Controller ─────────────────────────────────────────
 # arc_github_config_url: org-level (https://github.com/<org>) or
 #                        repo-level (https://github.com/<org>/<repo>)

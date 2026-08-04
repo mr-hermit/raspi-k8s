@@ -58,13 +58,21 @@ raspi/
 │       ├── cni/
 │       └── services/
 │
-└── addons/              Phases 3-8 — Optional K8s components (install per component)
-    ├── monitoring/      Phase 3 — Metrics Server + Prometheus + Grafana + Loki
+└── addons/              Phases 3-9 — Optional K8s components (install per component)
+    ├── monitoring/      Phase 3 — Metrics Server + Prometheus + Grafana
     │   ├── README.md
     │   ├── monitoring-setup.yaml
     │   └── files/
     │       ├── grafana-service.yaml
     │       └── grafana-ingress.yaml
+    │
+    ├── logging/         Phase 3b — Loki + Promtail log aggregation (needs monitoring + synology-csi)
+    │   ├── README.md
+    │   ├── logging-setup.yaml
+    │   └── files/
+    │       ├── loki-values.yaml.j2
+    │       ├── promtail-values.yaml
+    │       └── grafana-loki-datasource.yaml
     │
     ├── ingress/         Phase 4 — Nginx Ingress Controller + cert-manager
     │   ├── README.md
@@ -152,11 +160,12 @@ ansible-playbook -i inventory.ini k8s/k8s-setup.yaml
 
 # Addons — each is independent, run after k8s-setup.yaml
 ansible-playbook -i inventory.ini addons/monitoring/monitoring-setup.yaml
+ansible-playbook -i inventory.ini addons/synology-csi/synology-csi-setup.yaml
+ansible-playbook -i inventory.ini addons/logging/logging-setup.yaml   # needs monitoring + synology-csi above
 ansible-playbook -i inventory.ini addons/ingress/ingress-setup.yaml
 ansible-playbook -i inventory.ini addons/dashboard/dashboard-setup.yaml
 ansible-playbook -i inventory.ini addons/registry/registry-setup.yaml
 ansible-playbook -i inventory.ini addons/longhorn/longhorn-setup.yaml
-ansible-playbook -i inventory.ini addons/synology-csi/synology-csi-setup.yaml
 
 # Copy kubeconfig to your control machine
 scp hermit@rasserv01:~/.kube/config ~/.kube/config-raspi
@@ -199,7 +208,8 @@ ansible-vault encrypt inventory.ini
 - [server/README.md](server/README.md) — OS baseline setup
 - [storage/README.md](storage/README.md) — Synology iSCSI setup (manual steps + playbook)
 - [k8s/README.md](k8s/README.md) — Kubernetes cluster setup
-- [addons/monitoring/README.md](addons/monitoring/README.md) — Metrics Server, Prometheus, Grafana, Loki
+- [addons/monitoring/README.md](addons/monitoring/README.md) — Metrics Server, Prometheus, Grafana
+- [addons/logging/README.md](addons/logging/README.md) — Loki + Promtail log aggregation
 - [addons/ingress/README.md](addons/ingress/README.md) — Nginx Ingress Controller + cert-manager
 - [addons/dashboard/README.md](addons/dashboard/README.md) — Headlamp K8s web UI
 - [addons/registry/README.md](addons/registry/README.md) — Private container registry

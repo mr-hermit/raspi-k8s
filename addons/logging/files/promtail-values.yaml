@@ -1,0 +1,23 @@
+# addons/logging/files/promtail-values.yaml
+#
+# Promtail DaemonSet — ships logs from every pod on every node, all namespaces.
+# The chart's default scrape config already discovers all pods cluster-wide via
+# the Kubernetes SD — no extraScrapeConfigs needed. Per-project filtering
+# belongs in Grafana LogQL queries (e.g. {namespace="rinkai"}), not here.
+
+config:
+  clients:
+    - url: http://loki-gateway.monitoring.svc.cluster.local/loki/api/v1/push
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+
+# Run on the control-plane node too, not just workers, so its system pod logs
+# (kube-apiserver, etcd, calico, etc.) are captured as well.
+tolerations:
+  - effect: NoSchedule
+    operator: Exists

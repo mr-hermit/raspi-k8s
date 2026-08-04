@@ -1,0 +1,117 @@
+---
+# addons/logging/logging-setup.yaml
+#
+# PURPOSE: Deploy centralized log aggregation — Loki (single binary, filesystem
+#          storage on synology-iscsi) + Promtail (DaemonSet, all namespaces) —
+#          and wire Loki into the existing Grafana instance as a datasource.
+#
+#          Generic, cluster-wide infrastructure: Promtail ships logs from every
+#          pod on every node without namespace filtering. Per-project log views
+#          (e.g. a "rinkai" dashboard) are built later in Grafana / LogQL on top
+#          of this, in their own repos — not here.
+#
+# RUN AFTER addons/monitoring/monitoring-setup.yaml (reuses its "monitoring"
+# namespace and its Grafana instance's datasource sidecar) and
+# addons/synology-csi/synology-csi-setup.yaml (Loki's PVC needs the
+# synology-iscsi StorageClass).
+#
+# USAGE:
+#   ansible-playbook -i inventory.ini addons/logging/logging-setup.yaml
+#
+# TAGS (selective execution):
+#   logging_prereqs — add/update the Grafana Helm repo (grafana/loki, grafana/promtail)
+#   loki            — install Loki (single binary, filesystem storage, synology-iscsi PVC)
+#   promtail        — install Promtail (DaemonSet, ships logs from all namespaces)
+#   datasource      — apply the Grafana ConfigMap that registers Loki as a datasource
+
+- name: Deploy Loki + Promtail log aggregation to K8s
+  hosts: control_plane
+  become: yes
+  vars:
+    logging_namespace: monitoring   # shared with kube-prometheus-stack — required for the Grafana datasource sidecar to pick this up
+    loki_values_dest: /tmp/loki-values.yaml
+    promtail_values_dest: /tmp/promtail-values.yaml
+    datasource_manifest_dest: /tmp/grafana-loki-datasource.yaml
+    loki_retention_hours: "{{ (loki_retention_days | default(30)) | int * 24 }}"
+    # loki_pvc_size comes from inventory.ini
+
+  tasks:
+    - name: Add Grafana Helm repository
+      become: no
+      command: helm repo add grafana https://grafana.github.io/helm-charts
+      tags: [logging_prereqs]
+
+    - name: Update Helm repositories
+      become: no
+      command: helm repo update
+      tags: [logging_prereqs]
+
+    # ── Loki ──────────────────────────────────────────────────────────────────
+    - name: Render and copy Loki values
+      template:
+        src: files/loki-values.yaml.j2
+        dest: "{{ loki_values_dest }}"
+        mode: "0644"
+      tags: [loki]
+
+    - name: Install Loki via Helm
+      become: no
+      command: >-
+        helm upgrade --install loki grafana/loki
+        --namespace {{ logging_namespace }} --create-namespace
+        --values {{ loki_values_dest }}
+      tags: [loki]
+
+    - name: Wait for Loki to become ready
+      become: no
+      command: >-
+        kubectl wait pod -n {{ logging_namespace }}
+        -l app.kubernetes.io/instance=loki,app.kubernetes.io/component=single-binary
+        --for=condition=Ready --timeout=300s
+      changed_when: false
+      tags: [loki]
+
+    # ── Promtail ──────────────────────────────────────────────────────────────
+    - name: Copy Promtail values
+      copy:
+        src: files/promtail-values.yaml
+        dest: "{{ promtail_values_dest }}"
+        mode: "0644"
+      tags: [promtail]
+
+    - name: Install Promtail via Helm
+      become: no
+      command: >-
+        helm upgrade --install promtail grafana/promtail
+        --namespace {{ logging_namespace }} --create-namespace
+        --values {{ promtail_values_dest }}
+      tags: [promtail]
+
+    - name: Wait for Promtail DaemonSet to roll out
+      become: no
+      command: >-
+        kubectl wait pod -n {{ logging_namespace }}
+        -l app.kubernetes.io/instance=promtail
+        --for=condition=Ready --timeout=180s
+      changed_when: false
+      tags: [promtail]
+
+    # ── Grafana datasource ───────────────────────────────────────────────────
+    - name: Copy Grafana Loki datasource ConfigMap
+      copy:
+        src: files/grafana-loki-datasource.yaml
+        dest: "{{ datasource_manifest_dest }}"
+        mode: "0644"
+      tags: [datasource]
+
+    - name: Apply Grafana Loki datasource ConfigMap
+      become: no
+      command: kubectl apply -f {{ datasource_manifest_dest }}
+      tags: [datasource]
+
+    - name: Show usage hint
+      debug:
+        msg: >-
+          Loki is now a Grafana datasource — open http://{{ ansible_host }}:32000,
+          go to Explore, pick "Loki", and query e.g. {namespace="default"}
+      tags: [datasource]
